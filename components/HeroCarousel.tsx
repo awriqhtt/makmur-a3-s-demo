@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Package, Handshake } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import Button from "./ui/Button";
+import { ALL_PRODUCTS, DIVISIONS } from "@/lib/data";
 
 // Official WhatsApp glyph — using the real brand mark instead of a generic
 // chat-bubble icon so it's instantly recognizable as WhatsApp specifically.
@@ -24,9 +25,15 @@ function WhatsAppIcon({ className }: { className?: string }) {
 }
 
 // Nomor WhatsApp bisnis — disamakan dengan CONTACT.whatsappHref di
-// components/Footer.tsx (0877-2288-8916). Kalau nomor ini berubah,
+// components/Footer.tsx (0878-7831-1243). Kalau nomor ini berubah,
 // mirror juga ke Footer.tsx dan app/contact/page.tsx.
-const WHATSAPP_NUMBER = "6287722888916";
+const WHATSAPP_NUMBER = "6287878311243";
+
+// Jumlah SKU diambil otomatis dari katalog, dibulatkan ke bawah per puluhan:
+// 91 → "90+", 104 → "100+". Gak perlu diedit manual tiap produk bertambah.
+const SKU_LABEL = `${Math.floor(ALL_PRODUCTS.length / 10) * 10}+`;
+// Permintaan client: level teratas disebut "Kategori" (di kode: DIVISIONS).
+const TOTAL_KATEGORI = DIVISIONS.length;
 
 const SLIDES = [
   {
@@ -34,9 +41,9 @@ const SLIDES = [
     image: "/hero/slide-main.png",
     panelBg: "bg-ink",
     text: "text-white",
-    eyebrow: "Partner Packaging & Supply",
+    eyebrow: "Distribusi Kebutuhan HORECA",
     title: "Packaging yang bikin operasional tetap jalan.",
-    body: "Food packaging, plastic, paper & aluminium foil — 120+ SKU.",
+    body: `Food packaging, plastic, paper & aluminium foil — ${SKU_LABEL} SKU.`,
     cta: {
       kind: "whatsapp" as const,
       label: "Chat via WhatsApp",
@@ -48,9 +55,9 @@ const SLIDES = [
     image: "/hero/slide-stock.png",
     panelBg: "bg-brand",
     text: "text-white",
-    eyebrow: "Selalu ready stock",
-    title: "120+ SKU siap stok di 8 divisi produk.",
-    body: "Order rutin langsung dikirim tanpa nunggu produksi.",
+    eyebrow: "Katalog lengkap",
+    title: `${SKU_LABEL} SKU di ${TOTAL_KATEGORI} kategori produk.`,
+    body: "Pesanan rutin dijadwalkan dan dikirim sesuai kebutuhan outlet kamu.",
     cta: {
       kind: "link" as const,
       label: "Jelajahi produk",
@@ -63,13 +70,13 @@ const SLIDES = [
     image: "/hero/slide-delivery.png",
     panelBg: "bg-ink",
     text: "text-white",
-    eyebrow: "Jangkauan nasional",
-    title: "Rute terjadwal Jabodetabek sampai luar kota.",
-    body: "Jadwal pengiriman yang bisa diandalkan buat dapur & outlet.",
+    eyebrow: "Jabodetabek & sekitarnya",
+    title: "Pengiriman cepat dan terjadwal untuk dapur & outlet kamu.",
+    body: "Tepat waktu, sesuai jadwal operasional mitra.",
     cta: {
       kind: "link" as const,
       label: "Ajukan kerja sama",
-      href: "/contact",
+      href: "/kerjasama",
       icon: Handshake,
     },
   },

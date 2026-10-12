@@ -1,11 +1,5 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
 import { Inter } from "next/font/google";
-import Header from "@/components/Header";
-import Footer from "@/components/Footer";
-import LocationAvailabilityBanner from "@/components/LocationAvailabilityBanner";
-import WhatsAppFloatingButton from "@/components/WhatsAppFloatingButton";
-import MobileBottomBar from "@/components/MobileBottomBar";
 import SiteChrome from "@/components/SiteChrome";
 import { CartProvider } from "@/lib/cart-context";
 import "./globals.css";
@@ -13,9 +7,9 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "Makmur A3'S — Partner Packaging & Supply",
+  title: "Makmur A3'S — Distribusi Kebutuhan HORECA",
   description:
-    "Makmur A3'S menyediakan food packaging, plastic packaging, paper packaging, aluminium foil, dan kebutuhan operasional untuk restoran, hotel, retail, dan dapur industri di seluruh Indonesia.",
+    "Makmur A3'S menyediakan food packaging, plastic packaging, paper packaging, aluminium foil, dan kebutuhan operasional untuk hotel, restoran, dan katering di Jabodetabek dan sekitarnya.",
   icons: {
     icon: "/icon.png",
   },
@@ -27,22 +21,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="id" suppressHydrationWarning>
       <body
         className={`${inter.variable} font-sans antialiased text-ink bg-white pb-16 md:pb-0`}
         suppressHydrationWarning
       >
         <CartProvider>
-          <Suspense fallback={null}>
-            <Header />
-          </Suspense>
-          {children}
-          <LocationAvailabilityBanner />
-          <Footer />
-          <WhatsAppFloatingButton />
-          <Suspense fallback={null}>
-            <MobileBottomBar />
-          </Suspense>
+          <SiteChrome>{children}</SiteChrome>
         </CartProvider>
       </body>
     </html>

@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Layers, ArrowUpRight, ShoppingCart, Minus, Plus } from "lucide-react";
 import type { Product } from "@/lib/data";
-import { hasProductImage, getProductImagePath } from "@/lib/data";
+import { hasProductImage, getProductImagePath, getMoq } from "@/lib/data";
 import { useCart } from "@/lib/cart-context";
 
 export default function ProductCard({ product }: { product: Product }) {
@@ -15,6 +15,9 @@ export default function ProductCard({ product }: { product: Product }) {
   // update kode manual lagi.
   const available = hasProductImage(product.code);
   const imageSrc = getProductImagePath(product.code);
+
+  // null kalau MOQ_ENABLED = false (lihat lib/data.ts)
+  const moq = getMoq(product);
 
   const cartItem = items.find((i) => i.code === product.code);
 
@@ -79,7 +82,7 @@ export default function ProductCard({ product }: { product: Product }) {
 
         <div className="mt-auto">
           <div className="flex flex-col gap-1.5 text-xs text-ink/45 font-data border-t border-line pt-3 mb-3">
-            <span>MOQ {product.moq}</span>
+            {moq && <span>MOQ {moq}</span>}
             <span className="inline-flex items-center gap-1 text-ink group-hover:text-brand font-semibold transition-colors">
               Lihat spesifikasi <ArrowUpRight className="w-3.5 h-3.5" />
             </span>

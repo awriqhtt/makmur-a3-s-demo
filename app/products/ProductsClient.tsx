@@ -16,19 +16,25 @@ import { DIVISIONS, ALL_PRODUCTS } from "@/lib/data";
 
 const PAGE_SIZE = 12;
 
+// ISTILAH (permintaan client): di tampilan, level teratas disebut "Kategori"
+// dan level di bawahnya "Subkategori". Di KODE & URL nama lama dipertahankan
+// supaya link lama tidak putus:
+//   Kategori    = Division / `divisi`   (?divisi=...)
+//   Subkategori = Category / `kategori` (?kategori=...)
+
 function sortProducts<T extends { name: string; code: string }>(
   items: T[],
 ): T[] {
   return [...items].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Full Kategori tree, grouped by Divisi — always shows every divisi and
-// its kategori, regardless of what's currently active (fixes the "pick a
-// divisi first" dead end). No product-count badges — this list is purely
-// for picking a filter, counts just added visual noise. One click per row
-// does everything: selecting a divisi also opens its kategori list, no
-// separate chevron hit-target to reason about.
-// Accordion behavior: only one divisi's kategori list is expanded at a
+// Full tree: Kategori (Division) → Subkategori (Category). Always shows every
+// kategori and its subkategori, regardless of what's currently active (fixes
+// the "pick one first" dead end). No product-count badges — this list is
+// purely for picking a filter, counts just added visual noise. One click per
+// row does everything: selecting a kategori also opens its subkategori list,
+// no separate chevron hit-target to reason about.
+// Accordion behavior: only one kategori's subkategori list is expanded at a
 // time — opening another one auto-closes whichever was open.
 function KategoriTree({
   activeDivisiId,
@@ -135,7 +141,7 @@ export default function ProductsClient() {
       ? rawKategori
       : null;
 
-  // Which divisi group is expanded in the sidebar tree — accordion style,
+  // Which kategori group is expanded in the sidebar tree — accordion style,
   // only one at a time. Starts with the active one open (if any) so the
   // tree isn't a wall of collapsed groups on first load.
   const [expandedId, setExpandedId] = useState<string | null>(
@@ -190,10 +196,10 @@ export default function ProductsClient() {
     scrollToGridTop();
   };
 
-  // Picking a kategori sets BOTH divisi and kategori in one go — a kategori
-  // always belongs to exactly one divisi, so there's no such thing as
-  // "kategori without a divisi". This also keeps the Header's sticky divisi
-  // strip in sync automatically, no extra state needed.
+  // Picking a subkategori sets BOTH kategori and subkategori in one go — a
+  // subkategori always belongs to exactly one kategori, so there's no such
+  // thing as "subkategori without a kategori". This also keeps the Header's
+  // sticky kategori strip in sync automatically, no extra state needed.
   const goToKategori = (divisiId: string, kategoriId: string) => {
     const params = new URLSearchParams();
     params.set("divisi", divisiId);
@@ -281,7 +287,7 @@ export default function ProductsClient() {
           </h1>
           <p className="text-sm text-ink/45 leading-relaxed truncate">
             {activeDivisiId === "all"
-              ? "Filter berdasarkan divisi/kategori atau cari nama/kode produk."
+              ? "Filter berdasarkan kategori/subkategori atau cari nama/kode produk."
               : activeDivision?.blurb}
           </p>
         </div>
@@ -291,7 +297,7 @@ export default function ProductsClient() {
         <aside className="hidden lg:block w-64 shrink-0">
           <div>
             <div className="text-xs uppercase tracking-widest text-ink/40 font-data mb-3 px-1">
-              Divisi & Kategori
+              Kategori & Subkategori
             </div>
             <KategoriTree
               activeDivisiId={activeDivisiId}
@@ -342,7 +348,7 @@ export default function ProductsClient() {
           {filtered.length === 0 ? (
             <div className="text-center py-24 text-ink/45">
               Gak ada produk yang cocok dengan &quot;{query}&quot;. Coba keyword
-              atau divisi/kategori lain.
+              atau kategori/subkategori lain.
             </div>
           ) : (
             <>
@@ -430,7 +436,7 @@ export default function ProductsClient() {
             </div>
             <div className="overflow-y-auto p-4">
               <div className="text-xs uppercase tracking-widest text-ink/40 font-data mb-2 px-1">
-                Divisi & Kategori
+                Kategori & Subkategori
               </div>
               <KategoriTree
                 activeDivisiId={activeDivisiId}

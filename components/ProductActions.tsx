@@ -6,7 +6,7 @@ import Button from "@/components/ui/Button";
 import { useCart } from "@/lib/cart-context";
 import type { Product } from "@/lib/data";
 
-const WHATSAPP_NUMBER = "6287722888916";
+const WHATSAPP_NUMBER = "6287878311243";
 
 export default function ProductActions({ product }: { product: Product }) {
   const { items, addItem, updateQty } = useCart();

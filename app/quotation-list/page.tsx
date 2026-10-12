@@ -13,9 +13,9 @@ import {
 import SectionHeading from "@/components/ui/SectionHeading";
 import Button from "@/components/ui/Button";
 import { useCart } from "@/lib/cart-context";
-import { hasProductImage, getProductBySlug } from "@/lib/data";
+import { hasProductImage, getProductBySlug, getMoq } from "@/lib/data";
 
-const WHATSAPP_NUMBER = "6287722888916";
+const WHATSAPP_NUMBER = "6287878311243";
 
 export default function QuotationListPage() {
   const { items, updateQty, removeItem, clearCart, count } = useCart();
@@ -60,7 +60,10 @@ export default function QuotationListPage() {
             {items.map((item) => {
               const available = hasProductImage(item.code);
               const product = getProductBySlug(item.code);
-              const moqNum = product ? parseInt(product.moq, 10) : NaN;
+              // null kalau MOQ_ENABLED = false (lihat lib/data.ts), jadi
+              // badge "Di bawah MOQ" otomatis tidak muncul.
+              const moq = product ? getMoq(product) : null;
+              const moqNum = moq ? parseInt(moq, 10) : NaN;
               const belowMoq = !isNaN(moqNum) && item.qty < moqNum;
               return (
                 <div
@@ -93,7 +96,7 @@ export default function QuotationListPage() {
                       </div>
                       {belowMoq && (
                         <span className="text-[10px] font-data font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full whitespace-nowrap">
-                          Di bawah MOQ (min. {product!.moq})
+                          Di bawah MOQ (min. {moq})
                         </span>
                       )}
                     </div>

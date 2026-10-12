@@ -6,8 +6,8 @@ import { INDUSTRIES, getIndustryIcon, getIndustryImage } from "@/lib/data";
 // TODO: ganti dengan copy yang lebih spesifik per industri kalau ada.
 // Key harus persis sama dengan value di INDUSTRIES.
 const INDUSTRY_DESCRIPTIONS: Record<string, string> = {
-  // "F&B": "Packaging food-grade siap pakai untuk resto, cafe, sampai cloud kitchen.",
-  // "Retail": "Kemasan dan supply harian yang bikin operasional toko lebih rapi.",
+  // "Restoran": "Packaging food-grade siap pakai untuk dapur dan delivery restoran.",
+  // "Bakery": "Baking paper, paping bag, dan bahan baku untuk produksi bakery.",
 };
 
 function getIndustryDescription(name: string) {
@@ -80,7 +80,9 @@ export default function IndustriesShowcase() {
       {/* ===================== MOBILE — IG Story replica ===================== */}
       <MobileStoryInner />
 
-      {/* ===================== DESKTOP — horizontal scroll, hover reveal, drag pakai cursor ===================== */}
+      {/* ===================== DESKTOP — 5 card pas selebar container, hover reveal ===================== */}
+      {/* Lebar card = (100% - 4 gap × 1rem) / 5, jadi 5 industri pas penuh tanpa slot kosong.
+          Kalau INDUSTRIES nanti lebih dari 5, sisanya tetap bisa di-scroll / di-drag. */}
       <div
         ref={scrollerRef}
         onMouseDown={handlePointerDown}
@@ -99,12 +101,13 @@ export default function IndustriesShowcase() {
           return (
             <div
               key={ind}
-              className="group relative shrink-0 w-[calc(100%/6_-_14px)] aspect-[3/4] snap-start rounded-2xl overflow-hidden hover-lift"
+              className="group relative shrink-0 w-[calc((100%-4rem)/5)] aspect-[3/4] snap-start rounded-2xl overflow-hidden hover-lift"
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src={getIndustryImage(ind)}
                 alt={ind}
+                draggable={false}
                 className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/15 to-transparent" />
@@ -192,6 +195,7 @@ function MobileStoryInner() {
       onTouchEnd={handleTouchEnd}
     >
       {INDUSTRIES.map((ind, i) => (
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           key={ind}
           src={getIndustryImage(ind)}

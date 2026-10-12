@@ -1,16 +1,14 @@
 import { Mail, Clock, MapPin, ArrowUpRight, Phone } from "lucide-react";
 import Button from "@/components/ui/Button";
-import SectionHeading, { Eyebrow } from "@/components/ui/SectionHeading";
+import { Eyebrow } from "@/components/ui/SectionHeading";
+import FaqPreview from "@/components/FaqPreview";
 
-const ADDRESS =
-  "Jl. Jalak I No. 41, Pondok Ranji, Bintaro, Tangerang Selatan, Banten";
-const MAPS_QUERY = encodeURIComponent(ADDRESS);
-const WA_NUMBER = "6287722888916";
-const EMAIL = "management@makmurathrees.net";
+const WA_NUMBER = "6287878311243";
+const EMAIL = "management@makmurathrees.com";
+const CITY_AREA = "Tangerang Selatan, Banten";
 const GMAIL_COMPOSE_URL = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(
   EMAIL,
 )}`;
-
 function WhatsAppIcon({
   className,
 }: {
@@ -29,19 +27,19 @@ function WhatsAppIcon({
   );
 }
 
+// NOTE: hanya level kota, bukan alamat lengkap — sama seperti Footer,
+// permintaan klien biar gak ada alamat spesifik yang ke-expose ke publik.
 const INFO_ROWS = [
   {
     icon: Phone,
     label: "WhatsApp",
-    value: "0877-2288-8916",
+    value: "0878-7831-1243",
     href: `https://wa.me/${WA_NUMBER}`,
   },
   {
     icon: Mail,
     label: "Email",
     value: EMAIL,
-    // Bukan mailto: lagi — langsung ke Gmail web compose biar konsisten
-    // sama Footer, dan gak gantung ke default mail client device user.
     href: GMAIL_COMPOSE_URL,
   },
   {
@@ -52,16 +50,15 @@ const INFO_ROWS = [
   },
   {
     icon: MapPin,
-    label: "Kantor Pusat",
-    value: ADDRESS,
-    href: `https://www.google.com/maps?q=${MAPS_QUERY}`,
+    label: "Lokasi",
+    value: CITY_AREA,
+    href: null,
   },
 ];
 
 export default function ContactPage() {
   return (
     <>
-      {/* Hero band — terang, konsisten dengan section putih/sand lain di situs */}
       <section className="bg-white">
         <div className="max-w-7xl mx-auto px-5 md:px-8 pt-4 md:pt-6 pb-8 md:pb-10">
           <div className="grid lg:grid-cols-[1.05fr_0.95fr] gap-10 items-start">
@@ -107,69 +104,71 @@ export default function ContactPage() {
         </div>
       </section>
 
-      {/* Info list + peta — background dibedain dari hero biar section-nya kebaca terpisah */}
-      <section className="bg-sand py-16 md:py-20">
+      {/* HP preview FAQ (kiri) + satu kartu berisi header & detail kontak
+          (kanan). Sama tinggi: tinggi HP (±560px) jadi patokan, kartu kanan
+          meregang (items-stretch), header di atas, baris kontak membagi
+          sisa tinggi rata (flex-1). Mobile: kartu kontak dulu, HP di bawah. */}
+      <section className="bg-sand py-14 md:py-16">
         <div className="max-w-7xl mx-auto px-5 md:px-8">
-          <SectionHeading
-            eyebrow="Info kontak"
-            title="Detail kontak & lokasi kantor kami"
-          />
-          <div className="grid lg:grid-cols-[0.85fr_1.15fr] gap-10 lg:gap-14 mt-12">
-            {/* Kolom kiri — list editorial, bukan grid kartu */}
-            <div className="flex flex-col">
-              {INFO_ROWS.map((row) => {
-                const content = (
-                  <>
-                    <row.icon
-                      className="w-4.5 h-4.5 text-brand shrink-0 mt-1"
-                      strokeWidth={1.75}
-                    />
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-data uppercase tracking-widest text-ink/40 mb-1.5">
-                        {row.label}
-                      </div>
-                      <div className="font-medium text-ink leading-snug break-words">
-                        {row.value}
-                      </div>
-                    </div>
-                  </>
-                );
-                return row.href ? (
-                  <a
-                    key={row.label}
-                    href={row.href}
-                    target={row.href.startsWith("http") ? "_blank" : undefined}
-                    rel={
-                      row.href.startsWith("http")
-                        ? "noopener noreferrer"
-                        : undefined
-                    }
-                    className="group flex items-start gap-4 py-6 border-b border-ink/10 first:pt-0 hover:pl-1 transition-[padding] duration-200"
-                  >
-                    {content}
-                    <ArrowUpRight className="w-4 h-4 text-ink/25 shrink-0 ml-auto mt-1 group-hover:text-brand group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all" />
-                  </a>
-                ) : (
-                  <div
-                    key={row.label}
-                    className="flex items-start gap-4 py-6 border-b border-ink/10"
-                  >
-                    {content}
-                  </div>
-                );
-              })}
+          <div className="grid lg:grid-cols-2 gap-10 lg:gap-16 items-stretch">
+            <div className="order-2 lg:order-1">
+              <FaqPreview />
             </div>
 
-            {/* Kolom kanan — peta, polos tanpa badge tambahan */}
-            <div className="rounded-3xl overflow-hidden border border-line h-[340px] md:h-[420px] lg:h-full lg:min-h-[440px]">
-              <iframe
-                title="Lokasi Kantor Pusat Makmur A3'S"
-                src={`https://www.google.com/maps?q=${MAPS_QUERY}&output=embed`}
-                className="w-full h-full grayscale-[15%]"
-                style={{ border: 0 }}
-                loading="lazy"
-                referrerPolicy="no-referrer-when-downgrade"
-              />
+            <div className="order-1 lg:order-2 flex flex-col rounded-2xl bg-white border border-ink/10 px-6 md:px-8 pt-7 md:pt-8">
+              <div className="pb-6 border-b border-ink/10 shrink-0">
+                <Eyebrow>Info kontak</Eyebrow>
+                <h2 className="font-display text-2xl md:text-3xl leading-[1.1] mt-3">
+                  Detail kontak kami
+                </h2>
+              </div>
+
+              <div className="flex-1 flex flex-col">
+                {INFO_ROWS.map((row) => {
+                  const content = (
+                    <>
+                      <div className="w-10 h-10 rounded-full bg-brand/10 flex items-center justify-center shrink-0">
+                        <row.icon
+                          className="w-[18px] h-[18px] text-brand"
+                          strokeWidth={1.75}
+                        />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-data uppercase tracking-widest text-ink/40 mb-1.5">
+                          {row.label}
+                        </div>
+                        <div className="font-medium text-ink leading-snug break-words">
+                          {row.value}
+                        </div>
+                      </div>
+                    </>
+                  );
+                  const rowClass =
+                    "flex-1 flex items-center gap-4 py-5 border-b border-ink/10 last:border-b-0";
+                  return row.href ? (
+                    <a
+                      key={row.label}
+                      href={row.href}
+                      target={
+                        row.href.startsWith("http") ? "_blank" : undefined
+                      }
+                      rel={
+                        row.href.startsWith("http")
+                          ? "noopener noreferrer"
+                          : undefined
+                      }
+                      className={`group ${rowClass} hover:pl-1 transition-[padding] duration-200`}
+                    >
+                      {content}
+                      <ArrowUpRight className="w-4 h-4 text-ink/25 shrink-0 ml-auto group-hover:text-brand group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all" />
+                    </a>
+                  ) : (
+                    <div key={row.label} className={rowClass}>
+                      {content}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

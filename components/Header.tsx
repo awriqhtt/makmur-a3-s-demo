@@ -25,15 +25,17 @@ import { useCart } from "@/lib/cart-context";
 // row, since it's the highest-priority action. Anchor items (href
 // containing "#") are intentionally excluded from the "active" highlight —
 // see isNavActive() for why.
+//
+// "Klien" (/industries) and "Artikel" (/#artikel) were removed from this
+// nav per revision — the "Klien" preview section on the homepage stays
+// as-is, it's just no longer linked from the navbar/drawer.
 const NAV_ITEMS = [
   { href: "/", label: "Beranda" },
   { href: "__produk__", label: "Produk" },
   { href: "/about", label: "Tentang" },
-  { href: "/#keunggulan", label: "Keunggulan" },
-  { href: "/industries", label: "Klien" }, // TODO: move to /klien once industri+klien pages merge
-  { href: "/#artikel", label: "Artikel" }, // TODO: move to /artikel once blog page exists
+  { href: "/keunggulan", label: "Keunggulan" },
   { href: "/contact", label: "Kontak" },
-  { href: "/contact#bantuan", label: "Bantuan" }, // TODO: move to /bantuan once help center page exists
+  { href: "/bantuan", label: "Bantuan" },
 ];
 
 const SEARCH_PLACEHOLDER = "Cari produk, mis. Aluminium Foil, Cup 16oz…";
@@ -97,7 +99,7 @@ function SearchSuggestions({
       {divisions.length > 0 && (
         <div className="py-1.5">
           <div className="px-4 pt-1 pb-1 text-[10px] uppercase tracking-widest text-ink/35 font-data">
-            Divisi
+            Kategori
           </div>
           {divisions.map((d) => (
             <button
@@ -167,6 +169,12 @@ export default function Header() {
   const isOnProducts = pathname === "/products";
   const activeDivisi = isOnProducts ? searchParams.get("divisi") : null;
   const isAllActive = isOnProducts && !activeDivisi;
+  // Halaman Bantuan pakai chat widget full-width sendiri yang jadi
+  // sticky-nya sendiri (lihat app/bantuan/page.tsx) — header situs sengaja
+  // gak sticky di sini biar begitu discroll, dia geser naik ilang dan
+  // digantikan chat widget yang "ambil alih" penuh layar. Baris quick-nav
+  // divisi juga gak relevan di halaman ini jadi tetap disembunyiin.
+  const hideDivisiBar = pathname === "/bantuan";
   const { count: cartCount } = useCart();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [produkOpen, setProdukOpen] = useState(false);
@@ -221,7 +229,7 @@ export default function Header() {
   };
 
   // Hysteresis: enter the "scrolled" (shadow/compact height) state past
-  // 40px, only leave it once back below 20px. The dead zone in between
+  // 40px, only leave it once below 20px. The dead zone in between
   // stops momentum-scroll/trackpad jitter from toggling it back and forth.
   useEffect(() => {
     const onScroll = () => {
@@ -274,7 +282,7 @@ export default function Header() {
   return (
     <>
       <header
-        className={`sticky top-0 z-50 bg-white/95 border-b transition-shadow duration-300 ${
+        className={`${hideDivisiBar ? "" : "sticky top-0"} z-50 bg-white/95 border-b transition-shadow duration-300 ${
           scrolled
             ? "border-line shadow-md shadow-ink/5"
             : "border-line shadow-none"
@@ -410,56 +418,62 @@ export default function Header() {
             sticky and never hides. This is now the ONE sticky control for
             divisi selection; the sidebar in ProductsClient shows Kategori
             (one level down, scoped to the active divisi) instead of
-            duplicating this same divisi list. */}
-        <div className="border-t border-line bg-white" suppressHydrationWarning>
+            duplicating this same divisi list.
+            EXCEPTION: hidden on /bantuan — see hideDivisiBar above. */}
+        {!hideDivisiBar && (
           <div
-            className="max-w-7xl mx-auto px-5 md:px-8"
+            className="border-t border-line bg-white"
             suppressHydrationWarning
           >
-            <nav
-              ref={categoryScrollRef}
-              onMouseDown={onCategoryMouseDown}
-              onMouseMove={onCategoryMouseMove}
-              onMouseUp={endCategoryDrag}
-              onMouseLeave={endCategoryDrag}
-              onClickCapture={onCategoryClickCapture}
-              className={`flex items-center gap-1 overflow-x-auto no-scrollbar -mx-1 select-none transition-[padding] duration-300 ${
-                scrolled ? "py-1.5" : "py-2.5"
-              } ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
+            <div
+              className="max-w-7xl mx-auto px-5 md:px-8"
+              suppressHydrationWarning
             >
-              <Link
-                href="/products"
-                draggable={false}
-                className={`shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap ${
-                  isAllActive
-                    ? "bg-brand/10 text-brand"
-                    : "text-ink/70 hover:text-brand hover:bg-sand"
-                }`}
+              <nav
+                ref={categoryScrollRef}
+                onMouseDown={onCategoryMouseDown}
+                onMouseMove={onCategoryMouseMove}
+                onMouseUp={endCategoryDrag}
+                onMouseLeave={endCategoryDrag}
+                onClickCapture={onCategoryClickCapture}
+                className={`flex items-center gap-1 overflow-x-auto no-scrollbar -mx-1 select-none transition-[padding] duration-300 ${
+                  scrolled ? "py-1.5" : "py-2.5"
+                } ${isDragging ? "cursor-grabbing" : "cursor-grab"}`}
               >
-                <LayoutGrid className="w-3.5 h-3.5" strokeWidth={1.75} />
-                All Products
-              </Link>
-              {DIVISIONS.map((d) => {
-                const isActive = activeDivisi === d.id;
-                return (
-                  <Link
-                    key={d.id}
-                    href={`/products?divisi=${d.id}`}
-                    draggable={false}
-                    className={`shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap ${
-                      isActive
-                        ? "bg-brand/10 text-brand"
-                        : "text-ink/70 hover:text-brand hover:bg-sand"
-                    }`}
-                  >
-                    <d.icon className="w-3.5 h-3.5" strokeWidth={1.75} />
-                    {d.name}
-                  </Link>
-                );
-              })}
-            </nav>
+                <Link
+                  href="/products"
+                  draggable={false}
+                  className={`shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap ${
+                    isAllActive
+                      ? "bg-brand/10 text-brand"
+                      : "text-ink/70 hover:text-brand hover:bg-sand"
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" strokeWidth={1.75} />
+                  All Products
+                </Link>
+                {DIVISIONS.map((d) => {
+                  const isActive = activeDivisi === d.id;
+                  return (
+                    <Link
+                      key={d.id}
+                      href={`/products?divisi=${d.id}`}
+                      draggable={false}
+                      className={`shrink-0 flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors whitespace-nowrap ${
+                        isActive
+                          ? "bg-brand/10 text-brand"
+                          : "text-ink/70 hover:text-brand hover:bg-sand"
+                      }`}
+                    >
+                      <d.icon className="w-3.5 h-3.5" strokeWidth={1.75} />
+                      {d.name}
+                    </Link>
+                  );
+                })}
+              </nav>
+            </div>
           </div>
-        </div>
+        )}
       </header>
 
       {/* HAMBURGER DRAWER — sibling of <header>, not nested inside it.

@@ -9,8 +9,9 @@ import WhatsAppFloatingButton from "@/components/WhatsAppFloatingButton";
 import MobileBottomBar from "@/components/MobileBottomBar";
 
 // Halaman-halaman yang sengaja gak pakai chrome situs (navbar, footer, dst).
-// /invoice itu internal tool, bukan bagian dari public site.
-const CHROMELESS_PREFIXES = ["/invoice"];
+// /invoice (legacy) dan /admin (login + semua tool internal) bukan bagian
+// dari public site.
+const CHROMELESS_PREFIXES = ["/invoice", "/admin"];
 
 export default function SiteChrome({
   children,
@@ -20,6 +21,12 @@ export default function SiteChrome({
   const pathname = usePathname();
   const isChromeless = CHROMELESS_PREFIXES.some((p) => pathname.startsWith(p));
 
+  // /bantuan tetap pakai chrome situs (Header + Footer), tapi
+  // LocationAvailabilityBanner dan WhatsAppFloatingButton sengaja gak
+  // dimunculin — gak relevan di halaman chat FAQ dan bikin dobel sama
+  // tombol WA yang udah ada di dalam widget chat-nya sendiri.
+  const isBantuan = pathname === "/bantuan";
+
   if (isChromeless) return <>{children}</>;
 
   return (
@@ -28,9 +35,9 @@ export default function SiteChrome({
         <Header />
       </Suspense>
       {children}
-      <LocationAvailabilityBanner />
+      {!isBantuan && <LocationAvailabilityBanner />}
       <Footer />
-      <WhatsAppFloatingButton />
+      {!isBantuan && <WhatsAppFloatingButton />}
       <Suspense fallback={null}>
         <MobileBottomBar />
       </Suspense>

@@ -19,15 +19,25 @@ export default async function ProductDetailPage({
   const product = getProductBySlug(slug);
   if (!product) notFound();
 
-  const related = ALL_PRODUCTS.filter(
+  // Terkait: utamakan produk di subkategori yang sama, lalu sisanya dari
+  // kategori yang sama. Banyak subkategori cuma berisi 1 produk, jadi tanpa
+  // fallback ini bagian "terkait" sering kosong.
+  // (Di kode: categoryId = subkategori, divisionId = kategori.)
+  const sameSubkategori = ALL_PRODUCTS.filter(
     (p) => p.categoryId === product.categoryId && p.code !== product.code,
-  ).slice(0, 8);
+  );
+  const sameKategori = ALL_PRODUCTS.filter(
+    (p) =>
+      p.divisionId === product.divisionId &&
+      p.categoryId !== product.categoryId,
+  );
+  const related = [...sameSubkategori, ...sameKategori].slice(0, 8);
 
   return (
     <div className="max-w-5xl mx-auto px-5 md:px-8 py-12">
       <div className="flex items-center justify-between mb-6">
         <span className="text-xs font-data tracking-widest text-ink/45 uppercase">
-          {product.categoryName}
+          {product.divisionName} › {product.categoryName}
         </span>
         <Link
           href="/products"
@@ -46,14 +56,17 @@ export default async function ProductDetailPage({
           <h1 className="font-display text-2xl md:text-3xl mt-1 mb-4 leading-tight">
             {product.name}
           </h1>
+          {/* Satuan = satuan jual dari pricelist (data pasti). Kolom Packaging
+              & MOQ sengaja tidak ditampilkan dulu karena isinya masih
+              sebagian tebakan (lihat TODO di lib/data.ts). */}
           <div className="grid grid-cols-2 gap-4 mb-6 font-data">
             <Spec label="Material" value={product.material} />
             <Spec label="Ukuran" value={product.size} />
-            <Spec label="Packaging" value={product.pack} />
-            <Spec label="MOQ" value={product.moq} />
+            <Spec label="Satuan" value={product.unit} />
+            <Spec label="Kategori" value={product.divisionName} />
           </div>
           <div className="flex flex-wrap gap-2 mb-6">
-            {["Restoran", "Kafe", "Katering", "Retail"].map((tag) => (
+            {["Hotel", "Restoran", "Katering", "Kafe"].map((tag) => (
               <span
                 key={tag}
                 className="text-xs bg-sand px-3 py-1.5 rounded-full text-ink/70"
@@ -69,7 +82,7 @@ export default async function ProductDetailPage({
       {related.length > 0 && (
         <div className="mt-10">
           <div className="text-xs uppercase tracking-widest text-ink/45 font-data mb-4">
-            Produk terkait di divisi ini
+            Produk terkait
           </div>
           <RelatedCarousel products={related} />
         </div>

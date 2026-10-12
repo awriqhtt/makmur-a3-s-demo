@@ -2,7 +2,7 @@
 
 import { usePathname } from "next/navigation";
 
-const WHATSAPP_NUMBER = "6287722888916";
+const WHATSAPP_NUMBER = "6287878311243";
 const DEFAULT_MESSAGE = "Halo Makmur A3'S, saya mau tanya-tanya soal produk.";
 
 // Redundant with the explicit "Kirim ke WhatsApp" CTA already on quotation-list,

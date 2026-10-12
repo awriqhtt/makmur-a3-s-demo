@@ -6,20 +6,12 @@ import { MapPin, Search, Check, X } from "lucide-react";
 const COVERAGE_AREAS = [
   { name: "Jakarta", note: "Armada reguler, kirim H+1" },
   { name: "Tangerang", note: "Armada reguler, kirim H+1" },
+  { name: "Tangerang Selatan", note: "Armada reguler, kirim H+1" },
   { name: "Bekasi", note: "Armada reguler, kirim H+1" },
   { name: "Depok", note: "Armada reguler, kirim H+1" },
   { name: "Bogor", note: "Armada reguler, kirim H+2" },
-  { name: "Bandung", note: "Partner freight, kirim H+3" },
-  { name: "Surabaya", note: "Partner freight, kirim H+4" },
-  { name: "Semarang", note: "Partner freight, kirim H+3" },
-  { name: "Yogyakarta", note: "Partner freight, kirim H+3" },
-  { name: "Malang", note: "Partner freight, kirim H+4" },
-  { name: "Solo", note: "Partner freight, kirim H+3" },
   { name: "Cikarang", note: "Armada reguler, kirim H+1" },
   { name: "Karawang", note: "Armada reguler, kirim H+2" },
-  { name: "Serang", note: "Partner freight, kirim H+2" },
-  { name: "Medan", note: "Partner freight, kirim H+5" },
-  { name: "Makassar", note: "Partner freight, kirim H+6" },
 ];
 
 export default function LocationAvailabilityBanner() {
@@ -141,13 +133,13 @@ export default function LocationAvailabilityBanner() {
                   {filtered.map((area) => (
                     <div
                       key={area.name}
-                      className="flex items-center justify-between gap-3 px-2 py-3"
+                      className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3 px-2 py-3"
                     >
-                      <span className="flex items-center gap-2 text-sm font-medium text-ink">
+                      <span className="flex items-center gap-2 text-sm font-medium text-ink whitespace-nowrap">
                         <Check className="w-3.5 h-3.5 text-red-700 shrink-0" />
                         {area.name}
                       </span>
-                      <span className="text-xs text-ink/45 leading-snug text-right">
+                      <span className="text-xs text-ink/45 leading-snug pl-[22px] sm:pl-0 sm:text-right">
                         {area.note}
                       </span>
                     </div>

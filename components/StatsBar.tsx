@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Package, LayoutGrid, Users, Clock, type LucideIcon } from "lucide-react";
+import {
+  Package,
+  LayoutGrid,
+  Clock,
+  CalendarDays,
+  type LucideIcon,
+} from "lucide-react";
 
 // Icon lookup lives here (client-side) because component references (functions)
 // can't be passed as props from a Server Component to a Client Component —
@@ -10,40 +16,45 @@ import { Package, LayoutGrid, Users, Clock, type LucideIcon } from "lucide-react
 const ICONS: Record<string, LucideIcon> = {
   package: Package,
   "layout-grid": LayoutGrid,
-  users: Users,
   clock: Clock,
+  calendar: CalendarDays,
 };
 
-type Stat = {
-  value: string;
-  label: string;
-  icon: string;
-};
+type Stat = { value: string; label: string; icon: string };
 
-// Splits "120+" -> { target: 120, suffix: "+" }, "24 Jam" -> { target: 24, suffix: " Jam" }.
-// Falls back to showing the raw string statically if it doesn't start with a number.
+// Splits "90+" -> { target: 90, suffix: "+" }, "24 Jam" -> { target: 24, suffix: " Jam" }.
+// Nilai non-angka, dan angka 4 digit ke atas (tahun, mis. "2020"), ditampilkan
+// statis — tahun yang "menghitung naik dari 0" kelihatannya aneh.
 function parseValue(raw: string) {
   const match = raw.match(/^(\d+)(.*)$/);
-  if (!match) return { hasNumber: false as const, target: 0, suffix: raw };
-  return { hasNumber: true as const, target: parseInt(match[1], 10), suffix: match[2] };
+  if (!match || match[1].length >= 4) {
+    return { hasNumber: false as const, target: 0, suffix: raw };
+  }
+  return {
+    hasNumber: true as const,
+    target: parseInt(match[1], 10),
+    suffix: match[2],
+  };
 }
 
 function AnimatedStat({
   stat,
   index,
   active,
+  extraClass,
 }: {
   stat: Stat;
   index: number;
   active: boolean;
+  extraClass: string;
 }) {
   const { hasNumber, target, suffix } = parseValue(stat.value);
-  const [display, setDisplay] = useState(hasNumber ? 0 : target);
+  const [display, setDisplay] = useState(0);
   const Icon = ICONS[stat.icon];
 
   useEffect(() => {
     if (!active || !hasNumber) return;
-    const duration = 1000;
+    const duration = 900;
     const start = performance.now();
     let frame: number;
     const tick = (now: number) => {
@@ -58,20 +69,29 @@ function AnimatedStat({
 
   return (
     <div
-      className="flex flex-col items-center text-center gap-2 py-6 md:py-0 px-4 transition-all duration-500 ease-out"
+      className={`flex items-center gap-3.5 py-5 md:py-0 md:pl-8 md:first:pl-0 md:flex-1 transition-all duration-500 ease-out motion-reduce:transition-none ${extraClass}`}
       style={{
         transitionDelay: `${index * 100}ms`,
         opacity: active ? 1 : 0,
         transform: active ? "translateY(0)" : "translateY(10px)",
       }}
     >
-      <div className="w-12 h-12 rounded-full bg-brand/10 flex items-center justify-center mb-1">
-        {Icon && <Icon className="w-5 h-5 text-brand" strokeWidth={1.75} />}
+      <div className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-brand/10 flex items-center justify-center shrink-0">
+        {Icon && (
+          <Icon
+            className="w-[18px] h-[18px] md:w-5 md:h-5 text-brand"
+            strokeWidth={2}
+          />
+        )}
       </div>
-      <div className="font-display text-3xl md:text-4xl text-ink leading-none tabular-nums">
-        {hasNumber ? `${display}${suffix}` : stat.value}
+      <div>
+        <div className="font-display text-2xl sm:text-3xl text-ink leading-none tabular-nums whitespace-nowrap">
+          {hasNumber ? `${display}${suffix}` : stat.value}
+        </div>
+        <div className="text-xs md:text-sm text-ink/50 mt-1.5">
+          {stat.label}
+        </div>
       </div>
-      <div className="text-sm text-ink/45">{stat.label}</div>
     </div>
   );
 }
@@ -90,18 +110,41 @@ export default function StatsBar({ stats }: { stats: Stat[] }) {
           observer.disconnect();
         }
       },
-      { threshold: 0.4 },
+      { threshold: 0.3 },
     );
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
 
+  // Mobile: 2 kolom. Border bawah untuk semua baris kecuali baris terakhir,
+  // dan kalau jumlah stat ganjil, item terakhir melebar 2 kolom (di tengah)
+  // supaya gak menggantung sendirian.
+  // Desktop: 1 baris, kolom sama lebar (flex-1), pemisah lewat divide-x.
+  const mobileRows = Math.ceil(stats.length / 2);
+
   return (
-    <section className="border-y border-line bg-sand" ref={sectionRef}>
-      <div className="max-w-7xl mx-auto px-5 md:px-8 py-10 grid grid-cols-2 md:grid-cols-4 divide-y divide-line md:divide-y-0 md:divide-x">
-        {stats.map((s, i) => (
-          <AnimatedStat key={s.label} stat={s} index={i} active={active} />
-        ))}
+    <section className="bg-sand" ref={sectionRef}>
+      <div className="max-w-5xl mx-auto px-5 md:px-8 py-4 md:py-7 grid grid-cols-2 md:flex md:divide-x md:divide-line">
+        {stats.map((s, i) => {
+          const classes: string[] = [];
+          if (Math.floor(i / 2) < mobileRows - 1) {
+            classes.push("border-b border-line md:border-b-0");
+          }
+          if (stats.length % 2 === 1 && i === stats.length - 1) {
+            classes.push(
+              "col-span-2 md:col-span-1 justify-center md:justify-start",
+            );
+          }
+          return (
+            <AnimatedStat
+              key={s.label}
+              stat={s}
+              index={i}
+              active={active}
+              extraClass={classes.join(" ")}
+            />
+          );
+        })}
       </div>
     </section>
   );

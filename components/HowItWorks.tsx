@@ -71,7 +71,7 @@ export default function HowItWorks() {
             </p>
           </div>
         </div>
-        <Link href="/contact" className="shrink-0 w-full md:w-auto">
+        <Link href="/kerjasama" className="shrink-0 w-full md:w-auto">
           <span className="inline-flex items-center justify-center gap-1.5 w-full md:w-auto px-6 py-3 rounded-full bg-ink text-white text-sm font-medium hover:bg-brand transition-colors">
             Isi form pengajuan <ArrowRight className="w-3.5 h-3.5" />
           </span>

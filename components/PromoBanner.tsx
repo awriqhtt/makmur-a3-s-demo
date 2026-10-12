@@ -1,75 +1,168 @@
+import type { ReactNode } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import Button from "@/components/ui/Button";
+import { Eyebrow } from "@/components/ui/SectionHeading";
 
-function WhatsAppIcon({ className }: { className?: string }) {
+/**
+ * Semua banner ada di file ini, satu gaya (mengikuti banner About):
+ * foto full-bleed + satu gradient dari bawah + teks kiri-bawah + CTA.
+ * Mau ubah copy, foto, atau CTA? Edit preset di bawah.
+ *
+ * Pemakaian:
+ *   import PromoBanner, { DeliveryBanner } from "@/components/PromoBanner";
+ *   <PromoBanner />      // home, sudah bawa wrapper section
+ *   <DeliveryBanner />   // about, taruh di dalam section sendiri
+ */
+
+/* ------------------------------------------------------------------ */
+/* Ikon WhatsApp (lucide-react tidak punya logo brand)                 */
+/* ------------------------------------------------------------------ */
+
+function WhatsAppIcon({ className = "w-4 h-4" }: { className?: string }) {
   return (
     <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 16 16"
+      viewBox="0 0 24 24"
       fill="currentColor"
       className={className}
+      aria-hidden="true"
     >
-      <path d="M13.601 2.326A7.85 7.85 0 0 0 7.994 0C3.627 0 .068 3.558.064 7.926c0 1.399.366 2.76 1.057 3.965L0 16l4.204-1.102a7.9 7.9 0 0 0 3.79.965h.004c4.368 0 7.926-3.558 7.93-7.93A7.9 7.9 0 0 0 13.6 2.326zM7.994 14.521a6.6 6.6 0 0 1-3.356-.92l-.24-.144-2.494.654.666-2.433-.156-.251a6.56 6.56 0 0 1-1.007-3.505c0-3.626 2.957-6.584 6.591-6.584a6.56 6.56 0 0 1 4.66 1.931 6.56 6.56 0 0 1 1.928 4.66c-.004 3.639-2.961 6.592-6.592 6.592m3.615-4.934c-.197-.099-1.17-.578-1.353-.646-.182-.065-.315-.099-.445.099-.133.197-.513.646-.627.775-.114.133-.232.148-.43.05-.197-.1-.836-.308-1.592-.985-.59-.525-.985-1.175-1.103-1.372-.114-.198-.011-.304.088-.403.087-.088.197-.232.296-.346.1-.114.133-.198.198-.33.065-.134.034-.248-.015-.347-.05-.099-.445-1.076-.612-1.47-.16-.389-.323-.335-.445-.34-.114-.007-.247-.007-.38-.007a.73.73 0 0 0-.529.247c-.182.198-.691.677-.691 1.654s.71 1.916.81 2.049c.098.133 1.394 2.132 3.383 2.992.47.205.84.326 1.129.418.475.152.904.129 1.246.08.38-.058 1.171-.48 1.338-.943.164-.464.164-.86.114-.943-.049-.084-.182-.133-.38-.232" />
+      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" />
     </svg>
   );
 }
 
-export default function PromoBanner() {
+/* ------------------------------------------------------------------ */
+/* Komponen Banner (dipakai semua preset)                              */
+/* ------------------------------------------------------------------ */
+
+type BannerProps = {
+  image: { src: string; alt: string };
+  eyebrow?: string;
+  title: string;
+  description?: string;
+  cta: {
+    label: string;
+    href: string;
+    external?: boolean;
+    /** Ikon di kiri label. Kalau diisi, panah di kanan disembunyikan. */
+    icon?: ReactNode;
+  };
+  /** Tailwind untuk foto: focal point (object-[...]) atau flip (-scale-x-100) */
+  imageClassName?: string;
+};
+
+function Banner({
+  image,
+  eyebrow,
+  title,
+  description,
+  cta,
+  imageClassName = "",
+}: BannerProps) {
+  const button = (
+    <Button className="!bg-white !text-ink hover:!bg-ink hover:!text-white">
+      {cta.icon}
+      {cta.label}
+      {!cta.icon && <ArrowUpRight className="w-4 h-4" />}
+    </Button>
+  );
+
   return (
-    <section className="max-w-7xl mx-auto px-5 md:px-8">
-      <div className="relative overflow-hidden rounded-3xl bg-brand text-white">
-        {/* gradient base + balanced wave, same treatment as LocationAvailabilityBanner */}
-        <div
-          className="absolute inset-0 pointer-events-none overflow-hidden"
-          aria-hidden="true"
-        >
-          <div className="absolute inset-0 bg-gradient-to-br from-black/25 via-transparent to-black/10" />
-
-          <svg
-            className="absolute bottom-0 left-0 w-full h-10 md:h-16"
-            viewBox="0 0 1440 100"
-            preserveAspectRatio="none"
-            fill="none"
-          >
-            <path
-              d="M0 20 C 480 95, 960 -15, 1440 20 L1440 100 L0 100 Z"
-              fill="rgba(255,255,255,0.06)"
-            />
-            <path
-              d="M0 40 C 480 105, 960 5, 1440 40 L1440 100 L0 100 Z"
-              fill="rgba(0,0,0,0.12)"
-            />
-          </svg>
-        </div>
-
-        <div className="relative z-10 px-6 md:px-10 pt-8 md:pt-10 pb-10 md:pb-12 flex flex-col md:flex-row items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-full bg-white/15 flex items-center justify-center shrink-0">
-              <WhatsAppIcon className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h3 className="font-display text-lg md:text-xl text-white leading-snug">
-                Butuh volume besar atau request khusus?
-              </h3>
-              <p className="text-sm text-white/70 mt-1">
-                Chat tim kami langsung — kami bantu susun kebutuhan dan harga
-                sesuai skala bisnis kamu.
-              </p>
-            </div>
-          </div>
-
+    <div className="relative rounded-2xl overflow-hidden flex">
+      <Image
+        src={image.src}
+        alt={image.alt}
+        fill
+        sizes="(min-width: 1280px) 1216px, 100vw"
+        className={`object-cover ${imageClassName}`}
+      />
+      <div
+        className="absolute inset-0 bg-gradient-to-t from-ink via-ink/40 to-transparent"
+        aria-hidden="true"
+      />
+      <div className="relative z-10 w-full min-h-[260px] md:min-h-[300px] flex flex-col justify-end p-5 md:p-8">
+        {eyebrow && (
+          <Eyebrow>
+            <span className="text-white/70">{eyebrow}</span>
+          </Eyebrow>
+        )}
+        <h3 className="font-display text-lg sm:text-xl md:text-2xl text-white mt-1 mb-1 max-w-md">
+          {title}
+        </h3>
+        {description && (
+          <p className="text-xs md:text-sm text-white/75 max-w-md mb-4">
+            {description}
+          </p>
+        )}
+        {cta.external ? (
           <a
-            href="https://wa.me/6287722888916"
+            href={cta.href}
             target="_blank"
             rel="noopener noreferrer"
-            className="shrink-0"
+            className="w-fit"
           >
-            <Button className="!bg-white !text-ink hover:!bg-ink hover:!text-white">
-              Chat via WhatsApp <ArrowUpRight className="w-4 h-4" />
-            </Button>
+            {button}
           </a>
-        </div>
+        ) : (
+          <Link href={cta.href} className="w-fit">
+            {button}
+          </Link>
+        )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Preset banner — tambah baru tinggal copy salah satu                 */
+/* ------------------------------------------------------------------ */
+
+/** Home: ajakan chat WhatsApp untuk order volume besar. */
+export function BulkOrderBanner() {
+  return (
+    <Banner
+      image={{
+        src: "/banners/promo-bulk-order.png",
+        alt: "Tim A3'S berdiskusi pesanan dengan pemilik restoran",
+      }}
+      // Atur angka ini (55%-62%) sampai kepala dan sampel produk sama-sama terlihat.
+      imageClassName="object-[center_58%]"
+      eyebrow="Order khusus & volume besar"
+      title="Butuh stok banyak? Kami yang atur."
+      description="Tim kami bantu susun jumlah, harga, dan jadwal kirim sesuai skala bisnis kamu."
+      cta={{
+        label: "Chat via WhatsApp",
+        href: "https://wa.me/6287878311243",
+        external: true,
+        icon: <WhatsAppIcon className="w-5 h-5 text-[#25D366]" />,
+      }}
+    />
+  );
+}
+
+/** About: pengiriman terjadwal, CTA ke katalog. */
+export function DeliveryBanner() {
+  return (
+    <Banner
+      image={{
+        src: "/about/about-banner.jpg",
+        alt: "Distribusi dan pengiriman Makmur A3'S",
+      }}
+      eyebrow="Pengiriman Terjadwal"
+      title="Pengiriman cepat dan terjadwal untuk mitra."
+      description="Jadwal kirim disesuaikan dengan kebutuhan usaha kamu di Jabodetabek dan sekitarnya."
+      cta={{ label: "Lihat Katalog", href: "/products" }}
+    />
+  );
+}
+
+/* Default export = banner di home, lengkap dengan wrapper section */
+export default function PromoBanner() {
+  return (
+    <section className="max-w-7xl mx-auto px-5 md:px-8 pb-16 md:pb-24">
+      <BulkOrderBanner />
     </section>
   );
 }

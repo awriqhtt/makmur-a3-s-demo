@@ -2,33 +2,35 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Phone, Mail, MapPin, ChevronDown } from "lucide-react";
+import { Phone, Mail, MapPin, Clock, ChevronDown } from "lucide-react";
 import Logomark from "./Logomark";
 import { DIVISIONS } from "@/lib/data";
 
 // Kept in sync with Header's NAV_ITEMS (components/Header.tsx) — if a link
 // is added/renamed/removed in the header drawer, mirror it here too so the
 // footer doesn't quietly drift into its own, slightly different menu.
+// "Klien" and "Artikel" are intentionally NOT here: they were removed from
+// the header nav, so the footer follows.
 const COMPANY_LINKS = [
   { href: "/", label: "Beranda" },
   { href: "/products", label: "Produk" },
   { href: "/about", label: "Tentang" },
-  { href: "/#keunggulan", label: "Keunggulan" },
-  { href: "/industries", label: "Klien" },
-  { href: "/#artikel", label: "Artikel" },
+  { href: "/keunggulan", label: "Keunggulan" },
   { href: "/contact", label: "Kontak" },
-  { href: "/contact#bantuan", label: "Bantuan" },
+  { href: "/bantuan", label: "Bantuan" },
 ];
 
 // Sumber tunggal data kontak — disamakan persis dengan yang dipakai di
-// app/contact/page.tsx (WA_NUMBER, ADDRESS, email). Kalau data ini berubah
+// app/contact/page.tsx (WA_NUMBER, email, dll). Kalau data ini berubah
 // di contact page, mirror juga ke sini biar gak ada dua sumber kebenaran.
+// NOTE: lokasi sengaja cuma level kota (bukan alamat lengkap) — permintaan
+// klien, biar gak ada alamat spesifik yang ke-expose di publik.
 const CONTACT = {
-  whatsappDisplay: "0877-2288-8916",
-  whatsappHref: "https://wa.me/6287722888916",
-  email: "management@makmurathrees.net",
-  address:
-    "Jl. Jalak I No. 41, Pondok Ranji, Bintaro, Tangerang Selatan, Banten",
+  whatsappDisplay: "0878-7831-1243",
+  whatsappHref: "https://wa.me/6287878311243",
+  email: "management@makmurathrees.com",
+  cityArea: "Tangerang Selatan, Banten",
+  operatingHours: "Senin–Sabtu, 08.00–17.00 WIB",
 };
 
 type SectionKey = "perusahaan" | "katalog" | "kontak";
@@ -114,9 +116,9 @@ export default function Footer() {
         <div className="pb-6 md:pb-0">
           <Logomark dark />
           <p className="text-white/50 text-sm leading-relaxed mt-5 max-w-xs">
-            Supplier B2B premium asal Indonesia untuk food packaging, plastic
-            packaging, paper packaging, dan kebutuhan operasional — melayani
-            restoran, hotel, retail, dan dapur industri di seluruh negeri.
+            Distributor kebutuhan HORECA — food packaging, plastic packaging,
+            paper packaging, dan kebutuhan operasional untuk hotel, restoran,
+            dan katering di Jabodetabek dan sekitarnya.
           </p>
         </div>
 
@@ -133,8 +135,9 @@ export default function Footer() {
           ))}
         </FooterSection>
 
+        {/* DIVISIONS di kode = "Kategori" di tampilan (permintaan client). */}
         <FooterSection
-          title="Katalog"
+          title="Kategori"
           sectionKey="katalog"
           isOpen={openSections.katalog}
           onToggle={toggleSection}
@@ -172,8 +175,13 @@ export default function Footer() {
           >
             <Mail className="w-4 h-4 shrink-0" /> {CONTACT.email}
           </a>
-          <span className="flex items-start gap-2">
-            <MapPin className="w-4 h-4 shrink-0 mt-0.5" /> {CONTACT.address}
+
+          <span className="flex items-center gap-2">
+            <MapPin className="w-4 h-4 shrink-0" /> {CONTACT.cityArea}
+          </span>
+
+          <span className="flex items-center gap-2">
+            <Clock className="w-4 h-4 shrink-0" /> {CONTACT.operatingHours}
           </span>
         </FooterSection>
       </div>
@@ -183,6 +191,7 @@ export default function Footer() {
           <span>
             © {new Date().getFullYear()} Makmur A3&apos;S. Hak cipta dilindungi.
           </span>
+          <span>Melayani sejak 2020</span>
         </div>
       </div>
     </footer>

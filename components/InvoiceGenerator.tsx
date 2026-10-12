@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
 import {
   Plus,
   Trash2,
@@ -27,6 +28,7 @@ import {
   PenTool,
   X,
   Mail,
+  LogOut,
 } from "lucide-react";
 import { ALL_PRODUCTS } from "@/lib/data";
 import Logomark from "@/components/Logomark";
@@ -34,8 +36,8 @@ import Logomark from "@/components/Logomark";
 const COMPANY_DEFAULT = {
   address:
     "Jl. Jalak I No. 41, Pondok Ranji, Bintaro, Tangerang Selatan, Banten",
-  phone: "0877-2288-8916",
-  email: "management@makmurathrees.net",
+  phone: "0878-7831-1243",
+  email: "management@makmurathrees.com",
 };
 
 const DEFAULT_BANK = {
@@ -44,8 +46,6 @@ const DEFAULT_BANK = {
   accountHolder: "PT Makmur A3'S",
 };
 
-// 4 opsi pertama tampil sebagai pill langsung (paling sering dipakai),
-// sisanya (termasuk "Custom") disembunyikan di balik tombol "...".
 const TOP_OPTIONS = [
   { label: "Cash / COD", days: 0 },
   { label: "7 Hari", days: 7 },
@@ -92,10 +92,9 @@ type LineItem = {
 };
 
 // Satu Surat Jalan = satu "batch kirim". Satu invoice bisa punya banyak
-// Shipment (SJ-XXX-1, SJ-XXX-2, dst) — misal kirimannya dipecah beberapa
-// hari/beberapa truk. `itemsById` nyimpen qty yang dikirim di batch ini per
-// item invoice. `manuallyEdited` nge-flag baris ini biar berhenti ke-auto-isi
-// ulang begitu user ubah manual qty-nya di batch tsb.
+// Shipment (SJ-XXX-1, SJ-XXX-2, dst). `itemsById` nyimpen qty yang dikirim
+// di batch ini per item invoice. `manuallyEdited` nge-flag baris ini biar
+// berhenti ke-auto-isi ulang begitu user ubah manual qty-nya.
 type ShipmentItemEntry = {
   qty: number;
   included: boolean;
@@ -123,9 +122,8 @@ function formatNumber(n: number) {
   return new Intl.NumberFormat("id-ID").format(isNaN(n) ? 0 : n);
 }
 
-// Buat input harga dengan separator ribuan ("15.000") — input-nya text
-// biasa (bukan type=number, karena browser gak bisa nampilin titik ribuan
-// di input number), lalu apa yang diketik dibersihin ke angka murni di sini.
+// Input harga dengan separator ribuan ("15.000"): input-nya text biasa,
+// lalu apa yang diketik dibersihin ke angka murni di sini.
 function parseNumberInput(v: string) {
   return Number(v.replace(/\D/g, "")) || 0;
 }
@@ -168,11 +166,27 @@ function uid() {
   return Math.random().toString(36).slice(2, 9);
 }
 
-// Render nomor referensi panjang (INV-XXX-20260802-64-1 dst) dengan titik
-// wrap yang rapi — <wbr/> disisipin PERSIS setelah tiap tanda "-", jadi
-// kalau kepanjangan buat 1 baris, browser motongnya di batas segmen
-// (SJ-CUST-20260802-64 / -1), bukan asal motong di tengah angka kayak
-// "break-all" yang bikin keliatan numpuk/berantakan.
+// Ubah nomor HP lokal ("0878-7831-1243") jadi format wa.me ("62878...").
+// Kalau kosong, hasilnya string kosong (wa.me tanpa nomor = pilih kontak manual).
+function toWaNumber(phone: string) {
+  const d = phone.replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("62")) return d;
+  if (d.startsWith("0")) return "62" + d.slice(1);
+  return d;
+}
+
+// Salam otomatis sesuai jam perangkat (dipanggil pas pesan dibuat).
+function greeting() {
+  const h = new Date().getHours();
+  if (h >= 4 && h < 11) return "Selamat pagi";
+  if (h >= 11 && h < 15) return "Selamat siang";
+  if (h >= 15 && h < 18) return "Selamat sore";
+  return "Selamat malam";
+}
+
+// Render nomor referensi panjang dengan titik wrap yang rapi — <wbr/>
+// disisipin PERSIS setelah tiap tanda "-".
 function RefNumber({ value }: { value: string }) {
   const parts = value.split("-");
   return (
@@ -188,12 +202,8 @@ function RefNumber({ value }: { value: string }) {
   );
 }
 
-// Berapa qty item yang udah "kepakai" di shipment-shipment LAIN yang
-// nomor urutnya (seq) lebih kecil dari `beforeSeq` — dipakai buat nentuin
-// sisa qty yang boleh diisi di suatu batch kirim. Sengaja cuma ngitung
-// shipment yang seq-nya lebih awal (bukan "semua shipment lain" kayak
-// sebelumnya), biar alokasinya FIFO sesuai urutan batch kirim: batch yang
-// lebih belakangan otomatis "ngantre" dari sisa batch sebelumnya.
+// Berapa qty item yang udah "kepakai" di shipment dengan seq lebih kecil
+// dari `beforeSeq` (alokasi FIFO).
 function computeAvailableBefore(
   shipments: Shipment[],
   itemId: string,
@@ -208,15 +218,9 @@ function computeAvailableBefore(
   return consumed;
 }
 
-// Hitung ulang alokasi qty semua shipment berdasarkan urutan seq
-// (FIFO): shipment dengan seq lebih kecil "jatah"-nya dipenuhi duluan.
-// Entry yang `manuallyEdited` (pernah diubah manual sama user) tetap
-// dipertahankan nilainya (cuma di-clamp biar gak melebihi sisa yang
-// tersedia), sementara entry yang belum pernah disentuh manual
-// (auto-filled) dihitung ulang dari sisa qty yang belum "kepakai" oleh
-// shipment-shipment sebelumnya. Ini yang bikin: kalau SJ paling awal
-// dihapus, SJ-SJ sesudahnya yang masih auto otomatis "narik" qty yang
-// baru kebebas — bukan nyangkut di angka lama yang udah gak relevan.
+// Hitung ulang alokasi qty semua shipment berdasarkan urutan seq (FIFO).
+// Entry yang `manuallyEdited` dipertahankan (di-clamp ke sisa tersedia),
+// sisanya (auto-filled) dihitung ulang dari sisa qty.
 function recalcShipments(
   shipmentsList: Shipment[],
   itemsList: LineItem[],
@@ -252,16 +256,11 @@ function recalcShipments(
     recalced.set(s.id, { ...s, itemsById });
   });
 
-  // Balikin ke urutan array semula (bukan urutan seq) biar urutan tab SJ
-  // di UI gak berubah-ubah sendiri.
+  // Balikin ke urutan array semula biar urutan tab SJ gak berubah sendiri.
   return shipmentsList.map((s) => recalced.get(s.id)!);
 }
 
-// Nunggu semua <img> di dalam container bener-bener selesai load (atau
-// error, biar gak nge-hang selamanya) sebelum di-screenshot html2canvas —
-// khususnya buat Logomark yang render <img> lewat next/image. Tanpa ini,
-// capture bisa jalan duluan sebelum src gambar selesai di-resolve, jadi
-// logonya keliatan kepotong/kosong di hasil PDF & print.
+// Nunggu semua <img> selesai load (atau error) sebelum html2canvas jalan.
 async function waitForImages(container: HTMLElement) {
   const imgs = Array.from(container.querySelectorAll("img"));
   await Promise.all(
@@ -290,7 +289,14 @@ function WhatsAppIcon({ className = "" }: { className?: string }) {
   );
 }
 
+// Cap perusahaan. Teks atas dibaca kiri-ke-kanan lewat atas, teks bawah
+// kiri-ke-kanan lewat bawah (tegak, gak kebalik). ID path dibuat unik per
+// instance (useId) karena komponen ini dirender 3x (canvas, preview,
+// export) dan ID kembar bisa bikin teks melengkung hilang.
 function InvoiceStamp() {
+  const sid = useId().replace(/:/g, "");
+  const top = `stampTop-${sid}`;
+  const bottom = `stampBottom-${sid}`;
   return (
     <svg
       viewBox="0 0 160 160"
@@ -313,15 +319,15 @@ function InvoiceStamp() {
         stroke="#B81812"
         strokeWidth="1.5"
       />
-      <path id="stampArcTop" d="M 22 80 A 58 58 0 0 1 138 80" fill="none" />
-      <path id="stampArcBottom" d="M 138 82 A 58 58 0 0 1 22 82" fill="none" />
+      <path id={top} d="M 26 80 A 54 54 0 0 1 134 80" fill="none" />
+      <path id={bottom} d="M 20 80 A 60 60 0 0 0 140 80" fill="none" />
       <text fill="#B81812" fontSize="11" fontWeight="700" letterSpacing="2">
-        <textPath href="#stampArcTop" startOffset="50%" textAnchor="middle">
+        <textPath href={`#${top}`} startOffset="50%" textAnchor="middle">
           MAKMUR A3&apos;S
         </textPath>
       </text>
       <text fill="#B81812" fontSize="9" fontWeight="600" letterSpacing="3">
-        <textPath href="#stampArcBottom" startOffset="50%" textAnchor="middle">
+        <textPath href={`#${bottom}`} startOffset="50%" textAnchor="middle">
           PACKAGING &amp; SUPPLY
         </textPath>
       </text>
@@ -342,11 +348,7 @@ function Watermark() {
   );
 }
 
-// Header konsisten di paling atas tiap tab sidebar — icon-nya sama persis
-// kayak icon di rail tab kiri, jadi orang langsung nyambungin "lagi di tab
-// mana" tanpa perlu lirik rail lagi. Dipakai sebagai elemen pertama di
-// SETIAP blok konten tab (Customer, Invoice/Surat Jalan, Item, Diskon &
-// Ongkir, Rekening, TTD) biar semua tab punya "anchor" visual yang seragam.
+// Header konsisten di paling atas tiap tab sidebar.
 function SidebarSectionHeader({
   icon: Icon,
   label,
@@ -371,9 +373,6 @@ function SidebarSectionHeader({
   );
 }
 
-// Sub-section muted di DALAM satu tab (misal "Diskon" vs "Ongkos Kirim"
-// di tab Tambahan) — dipakai konsisten di semua tab yang punya lebih dari
-// satu kelompok field, biar gaya labelnya seragam di seluruh sidebar.
 function SidebarSubLabel({ children }: { children: React.ReactNode }) {
   return (
     <span className="text-[11px] font-semibold uppercase tracking-wide text-ink/40">
@@ -382,14 +381,9 @@ function SidebarSubLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Field serba-bisa: kalau editable=true dia jadi input/textarea beneran
-// (dipakai buat canvas yang lo edit langsung). Kalau editable=false dia
-// cuma render teks polos — dipakai khusus buat versi export/print biar
-// html2canvas nangkep isinya dengan benar (input value sering gagal
-// ke-capture sama html2canvas, teks biasa selalu aman).
-// Revisi: kalau editable=false DAN valuenya kosong, gak render apa-apa
-// sama sekali — biar field opsional (No. HP, Email, dll) yang belum diisi
-// gak ninggalin baris/spasi kosong di PDF, print, atau hasil share.
+// Field serba-bisa: editable=true -> input/textarea beneran; editable=false
+// -> teks polos (aman buat html2canvas). Kalau non-editable dan kosong,
+// gak render apa-apa.
 function Field({
   editable,
   value,
@@ -441,13 +435,7 @@ function Field({
   );
 }
 
-// Field nama produk khusus buat baris item di canvas — bukan pakai
-// <datalist> native (browser default, tampilannya jelek & beda-beda tiap
-// browser), tapi dropdown custom yang stylingnya senada sama ProductPicker
-// di sidebar: rounded, shadow, hover halus. Dropdown-nya di-render lewat
-// portal ke document.body (posisi "fixed" ngikutin lokasi input) biar gak
-// ke-crop sama overflow tabel/kolom di sekitarnya. Klik/fokus langsung
-// nampilin daftar produk (gak perlu ngetik dulu), ngetik tinggal mempersempit.
+// Field nama produk dengan dropdown custom (portal ke document.body).
 function ItemNameField({
   editable,
   value,
@@ -554,10 +542,7 @@ function ItemNameField({
   );
 }
 
-// Field satuan — sama arsitekturnya kayak ItemNameField (dropdown custom
-// lewat portal, bukan <datalist> native), tapi sumbernya UNIT_SUGGESTIONS.
-// Tetap bisa diketik bebas (gak dipaksa pilih dari list) buat satuan yang
-// belum ada di daftar.
+// Field satuan — arsitektur sama dengan ItemNameField.
 function UnitField({
   editable,
   value,
@@ -659,10 +644,7 @@ function UnitField({
 }
 
 // ── Dokumen bersama — dipakai DUA KALI: sekali editable (canvas layar),
-// sekali non-editable (versi export tersembunyi buat PDF/print). Layout
-// berubah tergantung docType: invoice nampilin harga & rekening, surat
-// jalan nampilin qty dikirim utk BATCH yang lagi aktif (bisa parsial) +
-// alamat tujuan sendiri + kolom ttd pengirim/penerima. ──────────────────
+// sekali non-editable (versi export tersembunyi buat PDF/print). ─────────
 function InvoiceDocument({
   editable,
   docType,
@@ -688,6 +670,11 @@ function InvoiceDocument({
   grandTotal,
   bank,
   signatureUrl,
+  signerName,
+  signerTitle,
+  showStamp,
+  taxRate,
+  taxAmount,
   shippingAddress,
   setShippingAddress,
   sjRows,
@@ -767,9 +754,7 @@ function InvoiceDocument({
         </div>
       </div>
 
-      {/* Billing address (invoice) vs shipping address (surat jalan) —
-          dua hal yang beda: tagihan biasanya ke kantor, kiriman bisa ke
-          gudang/outlet. */}
+      {/* Billing address (invoice) vs shipping address (surat jalan) */}
       <div className="relative z-10 mb-8">
         <p className="text-xs uppercase tracking-widest text-ink/40 mb-1">
           {isSJ ? "Kirim ke" : "Ditagihkan kepada"}
@@ -1032,6 +1017,12 @@ function InvoiceDocument({
                 <span>-{currency(discountAmount)}</span>
               </div>
             )}
+            {taxAmount > 0 && (
+              <div className="flex justify-between">
+                <span className="text-ink/60">PPN {taxRate}%</span>
+                <span>{currency(taxAmount)}</span>
+              </div>
+            )}
             {shippingCost > 0 && (
               <div className="flex justify-between">
                 <span className="text-ink/60">Ongkir</span>
@@ -1069,22 +1060,34 @@ function InvoiceDocument({
             <p>{bank.accountNumber}</p>
             <p>a.n. {bank.accountHolder}</p>
           </div>
+
+          {/* Blok tanda tangan: tanda tangan di lapisan bawah, cap di lapisan
+              atas dan menimpa tanda tangan. Cap bisa dimatikan lewat toggle
+              di tab TTD. Nama dan jabatan opsional. */}
           <div className="flex flex-col items-center gap-1">
-            <div className="h-16 flex items-end justify-center gap-1 relative">
+            <p className="text-xs text-ink/60">Hormat kami,</p>
+            <div className="relative w-40 h-20">
               {signatureUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={signatureUrl}
                   alt="Tanda tangan"
-                  className="h-16 object-contain relative z-10"
+                  className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
                 />
               )}
-              <div className="relative -mb-1 -ml-2 z-0">
-                <InvoiceStamp />
-              </div>
+              {showStamp && (
+                <div className="absolute left-8 bottom-0 z-10">
+                  <InvoiceStamp />
+                </div>
+              )}
             </div>
-            <div className="w-32 border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-              Hormat kami
+            <div className="w-40 border-t border-ink/30 pt-1 text-center">
+              <p className="text-xs font-semibold text-ink/70">
+                {signerName || "Makmur A3'S"}
+              </p>
+              {signerTitle && (
+                <p className="text-[11px] text-ink/50">{signerTitle}</p>
+              )}
             </div>
           </div>
         </div>
@@ -1093,21 +1096,41 @@ function InvoiceDocument({
   );
 }
 
+// Ukuran layout asli sebuah elemen. transform: scale() gak ngubah ukuran layout,
+// jadi dokumen 780px yang di-scale kecil tetep bikin area scroll selebar 780px
+// dan sisi kirinya kepotong di layar sempit. Ukuran ini dipakai buat bikin
+// pembungkus yang ukurannya ikut skala.
+function useElementSize(
+  ref: React.RefObject<HTMLElement | null>,
+  active = true,
+) {
+  const [size, setSize] = useState({ w: 780, h: 1100 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !active) return;
+    const update = () => setSize({ w: el.offsetWidth, h: el.offsetHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref, active]);
+  return size;
+}
+
 export default function InvoiceGenerator() {
+  const router = useRouter();
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const pageRef = useRef<HTMLDivElement>(null);
   const exportRef = useRef<HTMLDivElement>(null);
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const previewPageRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState<"pdf" | "share" | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const [mobileView, setMobileView] = useState<"edit" | "preview">("edit");
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [docType, setDocType] = useState<DocType>("invoice");
 
-  // Tab vertikal di sidebar kiri — menggantikan accordion. Tab yang
-  // tersedia beda tergantung docType (invoice punya lebih banyak
-  // kategori daripada surat jalan).
   const [activeSidebarTab, setActiveSidebarTab] = useState<string>("customer");
 
   const sidebarTabs = useMemo(() => {
@@ -1134,34 +1157,21 @@ export default function InvoiceGenerator() {
     return base;
   }, [docType]);
 
-  // Kalau tab yang lagi aktif gak ada lagi di daftar (misal pindah dari
-  // invoice ke surat jalan yang tab-nya lebih sedikit), balikin ke
-  // "customer" biar gak nyangkut di tab kosong.
   useEffect(() => {
     if (!sidebarTabs.some((t) => t.id === activeSidebarTab)) {
       setActiveSidebarTab("customer");
     }
   }, [sidebarTabs, activeSidebarTab]);
 
-  // Deteksi device buat nentuin instruksi share yang paling relevan —
-  // di HP (terutama Android) Web Share API sering bisa langsung nempelin
-  // PDF+teks jadi satu, sementara di desktop hampir selalu gak bisa
-  // (batasan browser desktop, bukan bug), jadi instruksinya beda.
   const [isMobile, setIsMobile] = useState(false);
   useEffect(() => {
     if (typeof navigator === "undefined") return;
     setIsMobile(/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent));
   }, []);
 
-  // Dropdown fallback untuk Share — cuma muncul kalau Web Share API gak
-  // didukung (kebanyakan desktop). Isinya pilihan lanjutan: WhatsApp /
-  // Email, yang masing-masing tinggal download PDF-nya lalu buka
-  // WA/mail client dengan teks siap kirim.
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const shareBtnRef = useRef<HTMLDivElement>(null);
 
-  // Notice kecil setelah share fallback dipakai, biar user tau PDF-nya
-  // otomatis kedownload dan harus dilampirkan manual.
   const [shareNotice, setShareNotice] = useState<{
     channel: "wa" | "email";
   } | null>(null);
@@ -1184,11 +1194,9 @@ export default function InvoiceGenerator() {
   const [autoFit, setAutoFit] = useState(true);
   const [previewZoom, setPreviewZoom] = useState(1);
   const [previewAutoFit, setPreviewAutoFit] = useState(true);
-  // Full-screen preview: nampilin invoice/surat jalan versi bersih
-  // (non-editable, persis kayak hasil PDF/print) di atas overlay penuh,
-  // lepas dari sidebar & canvas edit — biar user bisa ngecek hasil akhir
-  // dengan jelas sebelum kirim.
   const [showFullPreview, setShowFullPreview] = useState(false);
+  const canvasSize = useElementSize(pageRef);
+  const previewSize = useElementSize(previewPageRef, showFullPreview);
 
   const [company, setCompany] = useState(COMPANY_DEFAULT);
   const [customerName, setCustomerName] = useState("");
@@ -1211,12 +1219,18 @@ export default function InvoiceGenerator() {
   );
   const [discountValue, setDiscountValue] = useState(0);
   const [shippingCost, setShippingCost] = useState(0);
+  // PPN opsional — default mati, tarifnya bisa diubah.
+  const [taxEnabled, setTaxEnabled] = useState(false);
+  const [taxRate, setTaxRate] = useState(11);
   const [bank, setBank] = useState(DEFAULT_BANK);
   const [signatureUrl, setSignatureUrl] = useState<string | null>(null);
+  // Nama & jabatan penandatangan — opsional. Kalau nama kosong, di
+  // dokumen tampil "Makmur A3'S" sebagai default.
+  const [signerName, setSignerName] = useState("");
+  const [signerTitle, setSignerTitle] = useState("");
+  // Cap perusahaan bisa dimatikan (misal kalau pakai cap basah).
+  const [showStamp, setShowStamp] = useState(true);
 
-  // Alamat pengiriman surat jalan — default ikut alamat customer (tagihan),
-  // tapi bisa dilepas kalau kirimnya ke gudang/outlet yang beda. Berlaku
-  // untuk semua batch/SJ (satu alamat tujuan per invoice).
   const [shippingAddress, setShippingAddress] = useState({
     sameAsCustomer: true,
     name: "",
@@ -1224,12 +1238,6 @@ export default function InvoiceGenerator() {
     phone: "",
   });
 
-  // Surat Jalan sekarang mendukung BANYAK batch kirim per invoice (misal
-  // kirim 3x bertahap). Tiap batch = 1 Shipment dengan nomor SJ sendiri
-  // (SJ-XXX-1, SJ-XXX-2, dst) dan qty kirim sendiri per item. Batch yang
-  // "selesai" (bukan yang lagi aktif diedit) dibiarkan beku — item baru di
-  // invoice cuma otomatis masuk ke batch yang lagi aktif, bukan ke batch
-  // lama yang udah "berangkat".
   const initialShipmentId = useRef(uid()).current;
   const [shipments, setShipments] = useState<Shipment[]>(() =>
     recalcShipments(
@@ -1245,11 +1253,6 @@ export default function InvoiceGenerator() {
     [shipments, activeShipmentId],
   );
 
-  // Sinkron item invoice -> semua shipment, sekaligus realokasi FIFO
-  // (recalcShipments otomatis buang item yang udah dihapus dari invoice,
-  // dan hitung ulang jatah shipment yang belum diedit manual berdasarkan
-  // urutan seq). Ini juga yang bikin qty di batch-batch lain otomatis
-  // nyesuaiin begitu qty item di invoice berubah.
   useEffect(() => {
     setShipments((prev) => recalcShipments(prev, items));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1296,9 +1299,6 @@ export default function InvoiceGenerator() {
               },
             },
       );
-      // Realokasi shipment-shipment lain yang belum diedit manual (baik
-      // yang seq-nya sebelum maupun sesudah), supaya perubahan di sini
-      // langsung kececer ke batch-batch auto yang lain.
       return recalcShipments(updated, items);
     });
   };
@@ -1322,10 +1322,6 @@ export default function InvoiceGenerator() {
     setShipments((prev) => {
       if (prev.length <= 1) return prev;
       const filtered = prev.filter((s) => s.id !== id);
-      // Realokasi ulang FIFO — ini kuncinya: kalau yang dihapus adalah SJ
-      // paling awal (seq terkecil), qty yang tadinya "kepakai" di situ
-      // otomatis kebebas dan ke-alokasiin lagi ke SJ-SJ lain yang belum
-      // diedit manual, bukan ngilang begitu aja atau bikin sisa jadi salah.
       const next = recalcShipments(filtered, items);
       if (activeShipmentId === id) setActiveShipmentId(next[0].id);
       return next;
@@ -1371,7 +1367,10 @@ export default function InvoiceGenerator() {
     discountType === "percent"
       ? (subtotal * discountValue) / 100
       : discountValue;
-  const grandTotal = Math.max(subtotal - discountAmount, 0) + shippingCost;
+  // PPN dihitung dari subtotal setelah diskon; ongkir tidak dikenai PPN.
+  const taxableBase = Math.max(subtotal - discountAmount, 0);
+  const taxAmount = taxEnabled ? Math.round((taxableBase * taxRate) / 100) : 0;
+  const grandTotal = taxableBase + taxAmount + shippingCost;
 
   const suratJalanBase = invoiceNumber.replace(/^INV-/, "SJ-");
   const suratJalanNumber = activeShipment
@@ -1389,8 +1388,6 @@ export default function InvoiceGenerator() {
         : "Custom"
       : (TOP_OPTIONS.find((t) => t.days === topDays)?.label ?? "Custom");
 
-  // Auto-fit zoom: ngukur ukuran container canvas vs ukuran natural halaman,
-  // biar defaultnya invoice keliatan penuh tanpa perlu scroll.
   useEffect(() => {
     if (!autoFit) return;
     const recompute = () => {
@@ -1417,22 +1414,24 @@ export default function InvoiceGenerator() {
     };
   }, [autoFit, items.length, docType, panelCollapsed]);
 
-  // Auto-fit zoom khusus buat overlay full preview — dihitung terpisah
-  // dari canvas edit karena ukuran wrapper-nya beda (full screen, gak ada
-  // sidebar).
   useEffect(() => {
     if (!showFullPreview || !previewAutoFit) return;
     const recompute = () => {
       const wrap = previewWrapRef.current;
       const page = previewPageRef.current;
       if (!wrap || !page) return;
-      const availW = wrap.clientWidth - 64;
-      const availH = wrap.clientHeight - 64;
-      const scale = Math.min(
-        availW / page.scrollWidth,
-        availH / page.scrollHeight,
-        1.4,
-      );
+      const narrow = wrap.clientWidth < 768;
+      const pad = narrow ? 24 : 64;
+      const availW = wrap.clientWidth - pad;
+      const availH = wrap.clientHeight - pad;
+      // Di HP/tablet portrait: fit ke lebar saja biar teks gak terlalu kecil.
+      const scale = narrow
+        ? Math.min(availW / page.scrollWidth, 1.4)
+        : Math.min(
+            availW / page.scrollWidth,
+            availH / page.scrollHeight,
+            1.4,
+          );
       setPreviewZoom(scale > 0.1 ? scale : 0.5);
     };
     recompute();
@@ -1489,17 +1488,47 @@ export default function InvoiceGenerator() {
     setSignatureUrl(URL.createObjectURL(file));
   };
 
-  // ── Teks caption dihitung otomatis sesuai docType — dipakai sebagai teks
-  // yang nempel bareng PDF pas share (baik lewat share-sheet asli atau
-  // fallback WA/Email). ───────────────────────────────────────────────────
+  const handleLogout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await fetch("/api/admin/logout", { method: "POST" });
+    } finally {
+      router.replace("/admin/login");
+      router.refresh();
+    }
+  };
+
+  // ── Template pesan share — dihitung otomatis sesuai docType. Salam
+  // (pagi/siang/sore/malam) ngikutin jam perangkat saat pesan dibuat. ─────
   const shareCaption = () => {
+    const salam = greeting();
     if (docType === "invoice") {
-      return `Halo ${customerName || "Bapak/Ibu"}, berikut invoice ${invoiceNumber} dari Makmur A3'S.\n\nTotal tagihan: ${currency(grandTotal)}\nTermin: ${topLabel}\nJatuh tempo: ${dueDate}\n\nPDF invoice terlampir. Terima kasih!`;
+      const sapaan = `Bapak/Ibu${customerName ? ` ${customerName}` : ""}`;
+      return `${salam}, ${sapaan}.\n\nBerikut kami kirimkan invoice ${invoiceNumber} dari Makmur A3'S.\n\nTotal tagihan: ${currency(grandTotal)}\nTermin: ${topLabel}\nJatuh tempo: ${dueDate}\n\nPembayaran dapat ditransfer ke:\n${bank.bankName} ${bank.accountNumber}\na.n. ${bank.accountHolder}\n\nInvoice terlampir dalam PDF. Mohon dicek, Pak/Bu, terima kasih.`;
     }
     const targetName = shippingAddress.sameAsCustomer
       ? customerName
       : shippingAddress.name;
-    return `Halo ${targetName || "Bapak/Ibu"}, berikut surat jalan ${suratJalanNumber} (ref. invoice ${invoiceNumber}) dari Makmur A3'S.\n\nTanggal kirim: ${activeShipment?.date ?? documentDate}\nPDF surat jalan terlampir. Mohon dicek & dikonfirmasi ya. Terima kasih!`;
+    const sapaan = `Bapak/Ibu${targetName ? ` ${targetName}` : ""}`;
+    return `${salam}, ${sapaan}.\n\nBerikut kami kirimkan surat jalan ${suratJalanNumber} (ref. invoice ${invoiceNumber}) untuk pengiriman tanggal ${activeShipment?.date ?? documentDate}.\n\nSurat jalan terlampir dalam PDF. Mohon dicek saat barang diterima, Pak/Bu, terima kasih.`;
+  };
+
+  // Nomor tujuan WhatsApp: surat jalan ke alamat lain -> HP penerima,
+  // selain itu -> HP customer.
+  const shareTargetPhone = () =>
+    docType === "suratJalan" && !shippingAddress.sameAsCustomer
+      ? shippingAddress.phone
+      : customer.phone;
+
+  // Salin template pesan ke clipboard (cadangan kalau WhatsApp membuang
+  // teks saat file PDF ikut dikirim). Harus dipanggil langsung dari klik.
+  const copyCaption = () => {
+    try {
+      navigator.clipboard?.writeText(shareCaption()).catch(() => {});
+    } catch {
+      // clipboard gak tersedia — abaikan
+    }
   };
 
   const emailSubjectText = () =>
@@ -1512,8 +1541,6 @@ export default function InvoiceGenerator() {
   const getPdfFileName = () =>
     `${docType === "invoice" ? invoiceNumber : suratJalanNumber}.pdf`;
 
-  // Bikin dokumen jsPDF dari versi export tersembunyi. Dipakai bareng buat
-  // Download PDF biasa maupun buat dilampirkan ke Share.
   const buildPdfDocument = async () => {
     if (!exportRef.current) return null;
     const html2canvas = (await import("html2canvas")).default;
@@ -1530,8 +1557,6 @@ export default function InvoiceGenerator() {
     const pageHeight = 297;
     const imgHeight = (canvas.height * pageWidth) / canvas.width;
 
-    // Kalau kontennya lebih tinggi dari 1 halaman A4, potong jadi
-    // beberapa halaman biar gak ke-cutoff/ke-crop di bawah.
     let heightLeft = imgHeight;
     let position = 0;
     pdf.addImage(imgData, "PNG", 0, position, pageWidth, imgHeight);
@@ -1571,17 +1596,13 @@ export default function InvoiceGenerator() {
     }
   };
 
-  // Satu tombol "Share" yang manggil Web Share API (kalau didukung &
-  // browser bisa nge-share file) — biar user tinggal milih tujuan
-  // (WhatsApp, Email, Drive, dll) langsung dari share-sheet asli OS-nya,
-  // PDF + teks nempel otomatis di sana. wa.me / mailto: TIDAK BISA
-  // nempelin file (batasan WhatsApp/email client), jadi kalau Web Share
-  // gak didukung (kebanyakan kasus di desktop), fallback-nya adalah
-  // dropdown kecil berisi pilihan WhatsApp / Email — PDF didownload lalu
-  // WA/mail client dibuka terpisah dengan teks siap kirim.
+  // Share: Web Share API (HP) kirim PDF + teks. Template juga disalin ke
+  // clipboard dulu, karena WhatsApp sering membuang teks saat ada file.
+  // Kalau Web Share gak didukung (desktop), buka dropdown WhatsApp/Email.
   const handleShareClick = async () => {
     setBusy("share");
     setShareNotice(null);
+    copyCaption(); // sebelum await, supaya masih dianggap klik user
     try {
       const file = await getPdfFile();
       const caption = shareCaption();
@@ -1598,10 +1619,9 @@ export default function InvoiceGenerator() {
           });
           return;
         } catch (err: any) {
-          if (err?.name === "AbortError") return; // user batal, jangan fallback
+          if (err?.name === "AbortError") return;
         }
       }
-      // Web Share gak didukung / gagal — buka dropdown fallback.
       setShareMenuOpen(true);
     } finally {
       setBusy(null);
@@ -1611,12 +1631,13 @@ export default function InvoiceGenerator() {
   const handleShareFallback = async (channel: "wa" | "email") => {
     setShareMenuOpen(false);
     setBusy("share");
+    copyCaption();
     try {
       const file = await getPdfFile();
       if (file) downloadFile(file);
       if (channel === "wa") {
         window.open(
-          `https://wa.me/?text=${encodeURIComponent(shareCaption())}`,
+          `https://wa.me/${toWaNumber(shareTargetPhone())}?text=${encodeURIComponent(shareCaption())}`,
           "_blank",
         );
       } else {
@@ -1634,8 +1655,8 @@ export default function InvoiceGenerator() {
     if (!shareNotice) return null;
     const target = shareNotice.channel === "wa" ? "WhatsApp" : "aplikasi email";
     return isMobile
-      ? `PDF sudah otomatis kedownload ke HP kamu, dan ${target} sudah kebuka dengan teks siap kirim. Tinggal lampirkan PDF-nya dari folder Download / file manager.`
-      : `PDF sudah otomatis kedownload ke komputer, dan ${target} kebuka di tab/aplikasi baru dengan teks siap kirim. Lampirkan PDF yang barusan kedownload.`;
+      ? `PDF sudah otomatis kedownload, dan ${target} sudah kebuka dengan teks siap kirim. Lampirkan PDF-nya dari folder Download. Teks pesan juga sudah disalin, tinggal paste kalau belum muncul.`
+      : `PDF sudah otomatis kedownload ke komputer, dan ${target} kebuka di tab/aplikasi baru dengan teks siap kirim. Lampirkan PDF yang barusan kedownload. Teks pesan juga sudah disalin ke clipboard.`;
   };
 
   const docProps = {
@@ -1665,6 +1686,11 @@ export default function InvoiceGenerator() {
     grandTotal,
     bank,
     signatureUrl,
+    signerName,
+    signerTitle,
+    showStamp,
+    taxRate,
+    taxAmount,
     shippingAddress,
     setShippingAddress,
     sjRows,
@@ -1698,6 +1724,13 @@ export default function InvoiceGenerator() {
         }
         input[type="number"] {
           -moz-appearance: textfield;
+        }
+        @media (max-width: 1023px) {
+          input:not([type="checkbox"]):not([type="radio"]),
+          textarea,
+          select {
+            font-size: 16px !important;
+          }
         }
       `}</style>
 
@@ -1747,13 +1780,13 @@ export default function InvoiceGenerator() {
             setPreviewAutoFit(true);
             setShowFullPreview(true);
           }}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-line text-ink/60 hover:border-ink hover:text-ink transition-colors mr-1"
+          className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-line text-ink/60 hover:border-ink hover:text-ink transition-colors mr-1"
         >
           <Eye className="w-3.5 h-3.5" />
           Preview
         </button>
 
-        <div className="flex items-center gap-1">
+        <div className="hidden lg:flex items-center gap-1">
           <button
             onClick={() => {
               setAutoFit(false);
@@ -1783,6 +1816,18 @@ export default function InvoiceGenerator() {
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
         </div>
+
+        <button
+          onClick={handleLogout}
+          disabled={loggingOut}
+          aria-label="Keluar"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 transition-colors disabled:opacity-60"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">
+            {loggingOut ? "Keluar…" : "Keluar"}
+          </span>
+        </button>
       </div>
 
       <div className="no-print lg:hidden flex items-center gap-1 bg-white border-b border-line px-3 py-2 shrink-0">
@@ -1804,16 +1849,12 @@ export default function InvoiceGenerator() {
       </div>
 
       <div className="flex-1 flex min-h-0 relative">
-        {/* ── SIDEBAR KIRI — tab vertikal ("rail" ikon+label di kiri,
-            konten kategori aktif di kanannya) menggantikan accordion.
-            Semua kategori tetap keliatan sebagai daftar, kontennya gak
-            numpuk turun terus. Tab yang tersedia beda tergantung
-            docType. ────────────────────────────────────────────────── */}
+        {/* ── SIDEBAR KIRI ─────────────────────────────────────────── */}
         <div
           className={`no-print bg-white border-r border-line flex flex-col shrink-0 h-full transition-all duration-200 ${
             panelCollapsed
               ? "w-0 overflow-hidden"
-              : "w-full sm:w-[360px] lg:w-[380px]"
+              : "w-full lg:w-[380px]"
           } ${mobileView === "preview" ? "hidden lg:flex" : "flex"}`}
         >
           <div className="flex-1 flex min-h-0">
@@ -1838,10 +1879,6 @@ export default function InvoiceGenerator() {
               })}
             </div>
 
-            {/* Konten tab aktif — area scroll penuh, tanpa ringkasan
-                total nempel di bawah (totalnya udah keliatan jelas di
-                canvas/preview, jadi gak perlu diulang di sini — bikin
-                sidebar terasa lebih lega). */}
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
                 {activeSidebarTab === "customer" && docType === "invoice" && (
@@ -1914,12 +1951,13 @@ export default function InvoiceGenerator() {
                         />
                       </div>
                     </div>
+                    <p className="text-[11px] text-ink/40 -mt-2">
+                      No. HP dipakai untuk membuka chat WhatsApp langsung ke
+                      customer saat Share.
+                    </p>
                   </>
                 )}
 
-                {/* Mode Surat Jalan: gak perlu ulangin Nama/Alamat/HP/Email
-                    customer di sini — semua itu udah dari invoice. Tab ini
-                    fokus ke satu hal aja: kirim ke mana. */}
                 {activeSidebarTab === "customer" &&
                   docType === "suratJalan" && (
                     <>
@@ -2086,10 +2124,6 @@ export default function InvoiceGenerator() {
                                 </button>
                               );
                             })}
-                            {/* Custom: langsung 1 input jumlah hari inline di
-                              baris yang sama, bukan 2 box terpisah yang
-                              nongol di bawah. Label termin otomatis
-                              diturunkan dari angka harinya. */}
                             {topDays === null && (
                               <div className="flex items-center gap-1 pl-2.5 py-1 pr-2.5 rounded-full border border-ink bg-ink/5">
                                 <input
@@ -2199,12 +2233,9 @@ export default function InvoiceGenerator() {
                       <Plus className="w-4 h-4" /> Tambah Baris Kosong
                     </button>
 
-                    {/* Nama pakai dropdown pilihan katalog (sama kayak di
-                      canvas — ItemNameField), qty & harga input biasa.
-                      Semuanya sinkron dua arah lewat updateItem. */}
                     {items.length > 0 && (
                       <div className="flex flex-col gap-2">
-                        {items.map((it, idx) => (
+                        {items.map((it) => (
                           <div
                             key={it.id}
                             className="border border-line rounded-lg p-2.5 flex flex-col gap-1.5"
@@ -2316,6 +2347,43 @@ export default function InvoiceGenerator() {
                     </div>
 
                     <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
+                      <SidebarSubLabel>PPN</SidebarSubLabel>
+                      <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-2.5 cursor-pointer">
+                        <span className="text-sm text-ink/80">Kenakan PPN</span>
+                        <input
+                          type="checkbox"
+                          checked={taxEnabled}
+                          onChange={(e) => setTaxEnabled(e.target.checked)}
+                          className="w-4 h-4 accent-ink"
+                        />
+                      </label>
+                      {taxEnabled && (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.1"
+                              value={taxRate}
+                              onChange={(e) => setTaxRate(Number(e.target.value))}
+                              className="w-24 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                            />
+                            <span className="text-sm text-ink/60">%</span>
+                          </div>
+                          {taxAmount > 0 && (
+                            <p className="text-[11px] text-ink/40">
+                              PPN: +{currency(taxAmount)}
+                            </p>
+                          )}
+                        </>
+                      )}
+                      <p className="text-[11px] text-ink/40">
+                        Dihitung dari subtotal setelah diskon. Ongkir tidak
+                        dikenai PPN.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
                       <SidebarSubLabel>Ongkos Kirim</SidebarSubLabel>
                       <label className="text-xs font-medium text-ink/60">
                         Biaya Ongkir (opsional)
@@ -2399,6 +2467,15 @@ export default function InvoiceGenerator() {
                 {docType === "invoice" && activeSidebarTab === "ttd" && (
                   <>
                     <SidebarSectionHeader icon={PenTool} label="Tanda Tangan" />
+                    <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-2.5 cursor-pointer">
+                      <span className="text-sm text-ink/80">Tampilkan cap</span>
+                      <input
+                        type="checkbox"
+                        checked={showStamp}
+                        onChange={(e) => setShowStamp(e.target.checked)}
+                        className="w-4 h-4 accent-ink"
+                      />
+                    </label>
                     <label className="flex items-center justify-center gap-2 border border-dashed border-line rounded-lg py-2.5 text-sm text-ink/60 hover:border-ink cursor-pointer transition-colors">
                       <Upload className="w-4 h-4" />{" "}
                       {signatureUrl ? "Ganti file" : "Upload tanda tangan"}
@@ -2415,16 +2492,53 @@ export default function InvoiceGenerator() {
                         tampil di invoice.
                       </p>
                     )}
+                    {signatureUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setSignatureUrl(null)}
+                        className="text-[11px] text-ink/40 hover:text-brand self-start"
+                      >
+                        Hapus tanda tangan
+                      </button>
+                    )}
+
+                    <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
+                      <SidebarSubLabel>Penandatangan</SidebarSubLabel>
+                      <div>
+                        <label className="text-xs font-medium text-ink/60">
+                          Nama (opsional)
+                        </label>
+                        <input
+                          value={signerName}
+                          onChange={(e) => setSignerName(e.target.value)}
+                          placeholder="Contoh: Budi Santoso"
+                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium text-ink/60">
+                          Jabatan (opsional)
+                        </label>
+                        <input
+                          value={signerTitle}
+                          onChange={(e) => setSignerTitle(e.target.value)}
+                          placeholder="Contoh: Direktur"
+                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                        />
+                      </div>
+                      <p className="text-[11px] text-ink/40">
+                        Tampil di bawah garis tanda tangan. Kalau nama
+                        dikosongkan, yang tampil &quot;Makmur A3&apos;S&quot;.
+                      </p>
+                    </div>
                   </>
                 )}
               </div>
             </div>
           </div>
 
-          {/* ── Bar aksi — cuma 3 tombol: Share, Download PDF, Print.
-              "Share" manggil share-sheet asli (WA/Email/dll dipilih di
-              situ), jadi gak perlu 2 tombol WA & Email terpisah lagi. ── */}
-          <div className="no-print shrink-0 border-t border-line p-3 bg-white flex flex-col gap-2">
+          {/* ── Bar aksi: Share, PDF, Print ── */}
+          <div className="no-print shrink-0 border-t border-line p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white flex flex-col gap-2">
             {shareNotice && (
               <div className="flex items-start gap-2 bg-sand/60 border border-line rounded-lg px-3 py-2 text-[11px] text-ink/70 leading-relaxed">
                 <span className="flex-1">{getShareNoticeText()}</span>
@@ -2497,28 +2611,31 @@ export default function InvoiceGenerator() {
         {/* ── CANVAS (zoomable) ────────────────────────────────────── */}
         <div
           ref={canvasWrapRef}
-          className={`flex-1 h-full overflow-auto flex items-start justify-center p-6 relative ${mobileView === "edit" ? "hidden lg:flex" : "flex"}`}
+          className={`flex-1 h-full overflow-auto flex items-start p-6 relative ${mobileView === "edit" ? "hidden lg:flex" : "flex"}`}
         >
           <div
-            style={{
-              transform: `scale(${zoom})`,
-              transformOrigin: "top center",
-            }}
+            className="mx-auto shrink-0"
+            style={{ width: canvasSize.w * zoom, height: canvasSize.h * zoom }}
           >
             <div
-              ref={pageRef}
-              className="rounded-2xl border border-line shadow-sm overflow-hidden"
+              style={{
+                transform: `scale(${zoom})`,
+                transformOrigin: "top left",
+                width: "max-content",
+              }}
             >
-              <InvoiceDocument editable {...docProps} />
+              <div
+                ref={pageRef}
+                className="rounded-2xl border border-line shadow-sm overflow-hidden"
+              >
+                <InvoiceDocument editable {...docProps} />
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* ── FULL PREVIEW OVERLAY — versi bersih (non-editable, persis
-          hasil PDF/print) di atas overlay penuh layar, lepas dari
-          sidebar. Ini yang dimaksud "Preview": liat hasil akhir dokumen
-          apa adanya sebelum di-share/download/print. ────────────────── */}
+      {/* ── FULL PREVIEW OVERLAY ─────────────────────────────────── */}
       {showFullPreview && (
         <div className="no-print fixed inset-0 z-[200] bg-ink/60 backdrop-blur-sm flex flex-col">
           <div className="flex items-center gap-2 px-4 py-3 bg-white border-b border-line shrink-0">
@@ -2566,19 +2683,28 @@ export default function InvoiceGenerator() {
           </div>
           <div
             ref={previewWrapRef}
-            className="flex-1 overflow-auto flex items-start justify-center p-8"
+            className="flex-1 overflow-auto flex items-start p-3 sm:p-8"
           >
             <div
+              className="mx-auto shrink-0"
               style={{
-                transform: `scale(${previewZoom})`,
-                transformOrigin: "top center",
+                width: previewSize.w * previewZoom,
+                height: previewSize.h * previewZoom,
               }}
             >
               <div
-                ref={previewPageRef}
-                className="rounded-2xl shadow-2xl overflow-hidden"
+                style={{
+                  transform: `scale(${previewZoom})`,
+                  transformOrigin: "top left",
+                  width: "max-content",
+                }}
               >
-                <InvoiceDocument editable={false} {...docProps} />
+                <div
+                  ref={previewPageRef}
+                  className="rounded-2xl shadow-2xl overflow-hidden"
+                >
+                  <InvoiceDocument editable={false} {...docProps} />
+                </div>
               </div>
             </div>
           </div>
@@ -2609,9 +2735,7 @@ export default function InvoiceGenerator() {
         </div>
       )}
 
-      {/* Versi statis tersembunyi — dipakai KHUSUS buat print & PDF, biar
-          html2canvas nangkep teks dengan bener (bukan <input> yang suka
-          gagal ke-capture). */}
+      {/* Versi statis tersembunyi — dipakai KHUSUS buat print & PDF. */}
       <div
         style={{ position: "fixed", top: 0, left: "-10000px", zIndex: -1 }}
         aria-hidden
