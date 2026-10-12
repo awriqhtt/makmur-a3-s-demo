@@ -1427,11 +1427,7 @@ export default function InvoiceGenerator() {
       // Di HP/tablet portrait: fit ke lebar saja biar teks gak terlalu kecil.
       const scale = narrow
         ? Math.min(availW / page.scrollWidth, 1.4)
-        : Math.min(
-            availW / page.scrollWidth,
-            availH / page.scrollHeight,
-            1.4,
-          );
+        : Math.min(availW / page.scrollWidth, availH / page.scrollHeight, 1.4);
       setPreviewZoom(scale > 0.1 ? scale : 0.5);
     };
     recompute();
@@ -1852,9 +1848,7 @@ export default function InvoiceGenerator() {
         {/* ── SIDEBAR KIRI ─────────────────────────────────────────── */}
         <div
           className={`no-print bg-white border-r border-line flex flex-col shrink-0 h-full transition-all duration-200 ${
-            panelCollapsed
-              ? "w-0 overflow-hidden"
-              : "w-full lg:w-[380px]"
+            panelCollapsed ? "w-0 overflow-hidden" : "w-full lg:w-[380px]"
           } ${mobileView === "preview" ? "hidden lg:flex" : "flex"}`}
         >
           <div className="flex-1 flex min-h-0">
@@ -2365,7 +2359,9 @@ export default function InvoiceGenerator() {
                               min={0}
                               step="0.1"
                               value={taxRate}
-                              onChange={(e) => setTaxRate(Number(e.target.value))}
+                              onChange={(e) =>
+                                setTaxRate(Number(e.target.value))
+                              }
                               className="w-24 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
                             />
                             <span className="text-sm text-ink/60">%</span>
