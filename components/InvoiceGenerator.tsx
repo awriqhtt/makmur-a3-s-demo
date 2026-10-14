@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
@@ -14,7 +14,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Eye,
-  Pencil,
   ZoomIn,
   ZoomOut,
   Maximize2,
@@ -29,6 +28,9 @@ import {
   X,
   Mail,
   LogOut,
+  AlertTriangle,
+  Info,
+  Settings,
 } from "lucide-react";
 import { ALL_PRODUCTS } from "@/lib/data";
 import Logomark from "@/components/Logomark";
@@ -43,8 +45,16 @@ const COMPANY_DEFAULT = {
 const DEFAULT_BANK = {
   bankName: "Bank BCA",
   accountNumber: "1234567890",
-  accountHolder: "PT Makmur A3'S",
+  accountHolder: "Budi Santoso",
 };
+
+// Batas total invoice yang kemungkinan perlu materai Rp10.000. Dipakai
+// sebagai "5 juta ATAU LEBIH", jadi total pas Rp5.000.000 pun tetap diingatkan.
+const MATERAI_THRESHOLD = 5_000_000;
+
+// Zoom awal preview di HP: cukup besar supaya teks terbaca (dokumen 780px
+// di layar ~390px akan scroll horizontal; pinch-zoom / tombol Fit tersedia).
+const READABLE_ZOOM = 0.85;
 
 const TOP_OPTIONS = [
   { label: "Cash / COD", days: 0 },
@@ -70,8 +80,6 @@ const UNIT_SUGGESTIONS = [
   "carton",
 ];
 
-// Prefix badan usaha yang harus di-skip biar gak ikut kehitung sebagai
-// inisial — "PT. Emados Kebab Indonesia" harus jadi "EKI", bukan "PEK".
 const LEGAL_ENTITY_PREFIXES = [
   "PT",
   "CV",
@@ -81,6 +89,21 @@ const LEGAL_ENTITY_PREFIXES = [
   "FA",
   "TBK",
   "PERSERO",
+];
+
+const MONTHS_ID = [
+  "Januari",
+  "Februari",
+  "Maret",
+  "April",
+  "Mei",
+  "Juni",
+  "Juli",
+  "Agustus",
+  "September",
+  "Oktober",
+  "November",
+  "Desember",
 ];
 
 type LineItem = {
@@ -105,10 +128,45 @@ type Shipment = {
   id: string;
   seq: number;
   date: string;
+  // Kode GR / penerimaan barang dari customer. Per pengiriman, karena
+  // tiap pengiriman diterima sendiri-sendiri.
+  grCode: string;
+  // Alamat tujuan per pengiriman.
+  shipTo: ShipTo;
   itemsById: Record<string, ShipmentItemEntry>;
 };
 
+// Alamat tujuan satu surat jalan. Default: sama dengan alamat customer di
+// invoice. Tiap SJ boleh beda (misal pengiriman parsial ke outlet berbeda).
+type ShipTo = {
+  sameAsCustomer: boolean;
+  name: string;
+  address: string;
+  phone: string;
+};
+
+const DEFAULT_SHIP_TO: ShipTo = {
+  sameAsCustomer: true,
+  name: "",
+  address: "",
+  phone: "",
+};
+
 type DocType = "invoice" | "suratJalan";
+
+// Satu dokumen yang akan di-export (PDF / print / share).
+type ExportDoc = {
+  key: string;
+  kind: DocType;
+  fileName: string;
+  shipment?: Shipment; // hanya untuk kind "suratJalan"
+  props: Record<string, any>;
+};
+
+type BuiltPdf = { fileName: string; pdf: import("jspdf").jsPDF };
+
+// Dialog konfirmasi yang sedang aktif (hapus SJ / keluar).
+type ConfirmState = { kind: "logout" } | { kind: "shipment"; id: string };
 
 function currency(n: number) {
   return new Intl.NumberFormat("id-ID", {
@@ -128,14 +186,41 @@ function parseNumberInput(v: string) {
   return Number(v.replace(/\D/g, "")) || 0;
 }
 
-function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+// "2026-10-13" -> "13 Oktober 2026". Split manual (bukan new Date) supaya
+// tidak kena pergeseran zona waktu. Kalau format tidak valid, dikembalikan
+// apa adanya.
+function formatDateID(iso: string) {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d || m < 1 || m > 12) return iso;
+  return `${d} ${MONTHS_ID[m - 1]} ${y}`;
 }
 
+// Date -> "YYYY-MM-DD" berdasarkan tanggal LOKAL (bukan UTC).
+function toISODate(d: Date) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function todayISO() {
+  return toISODate(new Date());
+}
+
+// Aritmetika tanggal dari komponen y/m/d lokal, bukan new Date(iso) yang
+// diparse sebagai UTC.
 function addDaysISO(iso: string, days: number) {
-  const d = new Date(iso);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  return toISODate(new Date(y, m - 1, d + days));
+}
+
+// Selisih hari (to - from) dari komponen y/m/d. Pakai Date.UTC supaya
+// aman dari DST dan zona waktu.
+function diffDaysISO(fromIso: string, toIso: string) {
+  const [y1, m1, d1] = fromIso.split("-").map(Number);
+  const [y2, m2, d2] = toIso.split("-").map(Number);
+  if (!y1 || !m1 || !d1 || !y2 || !m2 || !d2) return null;
+  return Math.round(
+    (Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86_400_000,
+  );
 }
 
 function customerInitials(name: string) {
@@ -260,6 +345,51 @@ function recalcShipments(
   return shipmentsList.map((s) => recalced.get(s.id)!);
 }
 
+// Baris tabel SJ untuk satu shipment tertentu.
+function computeSjRows(
+  items: LineItem[],
+  shipments: Shipment[],
+  shipment: Shipment | undefined,
+) {
+  if (!shipment) return [];
+  return items.map((it) => {
+    const entry = shipment.itemsById[it.id] ?? {
+      qty: 0,
+      included: false,
+      manuallyEdited: false,
+    };
+    const availableBefore = computeAvailableBefore(
+      shipments,
+      it.id,
+      shipment.seq,
+    );
+    const maxAllowed = Math.max(it.qty - availableBefore, 0);
+    const remainingAfterThis = Math.max(
+      it.qty - availableBefore - entry.qty,
+      0,
+    );
+    return {
+      ...it,
+      shippedQty: entry.qty,
+      included: entry.included,
+      maxAllowed,
+      remainingAfterThis,
+    };
+  });
+}
+
+// SJ dianggap "ada isinya" kalau minimal satu item dicentang DAN qty > 0.
+function shipmentHasItems(shipment: Shipment | undefined) {
+  if (!shipment) return false;
+  return Object.values(shipment.itemsById).some((e) => e.included && e.qty > 0);
+}
+
+// Satu-satunya tempat nomor SJ dibentuk dari nomor invoice.
+function buildSuratJalanNumber(invoiceNumber: string, seq?: number) {
+  const base = invoiceNumber.replace(/^INV-/, "SJ-");
+  return seq === undefined ? base : `${base}-${seq}`;
+}
+
 // Nunggu semua <img> selesai load (atau error) sebelum html2canvas jalan.
 async function waitForImages(container: HTMLElement) {
   const imgs = Array.from(container.querySelectorAll("img"));
@@ -275,6 +405,14 @@ async function waitForImages(container: HTMLElement) {
   );
 }
 
+// Tunggu 2 frame supaya DOM area export pasti sudah sinkron dengan state.
+const nextFrames = () =>
+  new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+
+const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 function WhatsAppIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -289,47 +427,57 @@ function WhatsAppIcon({ className = "" }: { className?: string }) {
   );
 }
 
-// Cap perusahaan. Teks atas dibaca kiri-ke-kanan lewat atas, teks bawah
-// kiri-ke-kanan lewat bawah (tegak, gak kebalik). ID path dibuat unik per
-// instance (useId) karena komponen ini dirender 3x (canvas, preview,
-// export) dan ID kembar bisa bikin teks melengkung hilang.
+// Cap perusahaan berbentuk kotak (border ganda, nama di tengah). Semua teks
+// lurus (tanpa textPath) jadi aman dirender html2canvas.
 function InvoiceStamp() {
-  const sid = useId().replace(/:/g, "");
-  const top = `stampTop-${sid}`;
-  const bottom = `stampBottom-${sid}`;
   return (
     <svg
-      viewBox="0 0 160 160"
-      className="w-20 h-20 opacity-80"
-      style={{ transform: "rotate(-8deg)" }}
+      viewBox="0 0 160 100"
+      className="w-28 h-auto opacity-80"
+      style={{ transform: "rotate(-6deg)" }}
     >
-      <circle
-        cx="80"
-        cy="80"
-        r="74"
+      <rect
+        x="3"
+        y="3"
+        width="154"
+        height="94"
+        rx="4"
         fill="none"
         stroke="#B81812"
         strokeWidth="3"
       />
-      <circle
-        cx="80"
-        cy="80"
-        r="64"
+      <rect
+        x="9"
+        y="9"
+        width="142"
+        height="82"
+        rx="2"
         fill="none"
         stroke="#B81812"
-        strokeWidth="1.5"
+        strokeWidth="1.2"
       />
-      <path id={top} d="M 26 80 A 54 54 0 0 1 134 80" fill="none" />
-      <path id={bottom} d="M 20 80 A 60 60 0 0 0 140 80" fill="none" />
-      <text fill="#B81812" fontSize="11" fontWeight="700" letterSpacing="2">
-        <textPath href={`#${top}`} startOffset="50%" textAnchor="middle">
-          MAKMUR A3&apos;S
-        </textPath>
+      <text
+        x="80"
+        y="44"
+        textAnchor="middle"
+        fill="#B81812"
+        fontSize="16"
+        fontWeight="800"
+        letterSpacing="0.5"
+      >
+        MAKMUR A3&apos;S
       </text>
-      <text fill="#B81812" fontSize="9" fontWeight="600" letterSpacing="3">
-        <textPath href={`#${bottom}`} startOffset="50%" textAnchor="middle">
-          PACKAGING &amp; SUPPLY
-        </textPath>
+      <line x1="26" y1="53" x2="134" y2="53" stroke="#B81812" strokeWidth="1" />
+      <text
+        x="80"
+        y="69"
+        textAnchor="middle"
+        fill="#B81812"
+        fontSize="9"
+        fontWeight="700"
+        letterSpacing="1.5"
+      >
+        SUPPLY &amp; PACKAGING
       </text>
     </svg>
   );
@@ -337,7 +485,7 @@ function InvoiceStamp() {
 
 function Watermark() {
   return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none z-0 overflow-hidden">
+    <div className="absolute inset-y-0 -inset-x-6 md:-inset-x-10 flex items-center justify-center pointer-events-none select-none z-0">
       <span
         className="text-[6rem] font-black text-ink whitespace-nowrap"
         style={{ opacity: 0.035, transform: "rotate(-18deg)" }}
@@ -381,9 +529,47 @@ function SidebarSubLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+// Satu baris checkbox bundling di bar aksi / sheet Bagikan.
+function BundleCheck({
+  checked,
+  disabled,
+  label,
+  note,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  label: string;
+  note?: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div>
+      <label
+        className={`flex items-center gap-2 text-xs py-2 lg:py-0 ${
+          disabled
+            ? "text-ink/30 cursor-not-allowed"
+            : "text-ink/80 cursor-pointer"
+        }`}
+      >
+        <input
+          type="checkbox"
+          className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+      </label>
+      {note && <p className="text-[11px] text-ink/40 mt-0.5 pl-7">{note}</p>}
+    </div>
+  );
+}
+
 // Field serba-bisa: editable=true -> input/textarea beneran; editable=false
 // -> teks polos (aman buat html2canvas). Kalau non-editable dan kosong,
-// gak render apa-apa.
+// gak render apa-apa (kecuali showPlaceholder: mode ketuk-untuk-edit di HP,
+// supaya area kosong tetap kelihatan dan bisa diketuk).
 function Field({
   editable,
   value,
@@ -393,6 +579,7 @@ function Field({
   widthClass = "w-full",
   multiline = false,
   type = "text",
+  showPlaceholder = false,
 }: {
   editable: boolean;
   value: string;
@@ -402,9 +589,21 @@ function Field({
   widthClass?: string;
   multiline?: boolean;
   type?: string;
+  showPlaceholder?: boolean;
 }) {
   if (!editable) {
-    if (!value) return null;
+    if (!value) {
+      if (showPlaceholder && placeholder) {
+        return (
+          <span
+            className={`${widthClass} ${className} inline-block italic !text-ink/30`}
+          >
+            {placeholder}
+          </span>
+        );
+      }
+      return null;
+    }
     return (
       <span
         className={`${widthClass} ${className} whitespace-pre-line inline-block`}
@@ -435,46 +634,68 @@ function Field({
   );
 }
 
-// Field nama produk dengan dropdown custom (portal ke document.body).
-function ItemNameField({
-  editable,
-  value,
-  onChange,
-}: {
-  editable: boolean;
-  value: string;
-  onChange: (v: string) => void;
-}) {
+// ── Dropdown mengambang (nama produk / satuan) ───────────────────────────
+// Posisi dihitung terhadap visual viewport: kalau ruang di bawah input
+// sempit (misal ketutup keyboard HP), daftar dibuka ke ATAS input.
+type DropdownPos = {
+  top?: number;
+  bottom?: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+};
+
+function computeDropdownPos(
+  el: HTMLElement,
+  minWidth: number,
+  desiredMax: number,
+): DropdownPos {
+  const r = el.getBoundingClientRect();
+  const vv = window.visualViewport;
+  const viewTop = vv ? vv.offsetTop : 0;
+  const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+  const spaceBelow = viewBottom - r.bottom - 8;
+  const spaceAbove = r.top - viewTop - 8;
+  const openUp =
+    spaceBelow < Math.min(desiredMax, 160) && spaceAbove > spaceBelow;
+  const maxHeight = Math.max(
+    Math.min(desiredMax, openUp ? spaceAbove : spaceBelow),
+    96,
+  );
+  const width = Math.max(r.width, minWidth);
+  const left = Math.min(
+    Math.max(r.left, 8),
+    Math.max(window.innerWidth - width - 8, 8),
+  );
+  return openUp
+    ? { bottom: window.innerHeight - r.top + 4, left, width, maxHeight }
+    : { top: r.bottom + 4, left, width, maxHeight };
+}
+
+function useFloatingList(minWidth: number, desiredMax: number) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 220 });
+  const [pos, setPos] = useState<DropdownPos>({
+    top: 0,
+    left: 0,
+    width: minWidth,
+    maxHeight: desiredMax,
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const results = useMemo(() => {
-    const q = value.trim().toLowerCase();
-    const source = q
-      ? ALL_PRODUCTS.filter(
-          (p) =>
-            p.name.toLowerCase().includes(q) ||
-            p.code.toLowerCase().includes(q),
-        )
-      : ALL_PRODUCTS;
-    return source.slice(0, 8);
-  }, [value]);
-
-  const updatePosition = () => {
-    const el = inputRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 220) });
-  };
-
   useEffect(() => {
     if (!open) return;
-    updatePosition();
-    const onScrollOrResize = () => updatePosition();
-    window.addEventListener("scroll", onScrollOrResize, true);
-    window.addEventListener("resize", onScrollOrResize);
+    const update = () => {
+      const el = inputRef.current;
+      if (!el) return;
+      setPos(computeDropdownPos(el, minWidth, desiredMax));
+    };
+    update();
+    const vv = window.visualViewport;
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
     const handleClickOutside = (e: MouseEvent) => {
       if (
         inputRef.current &&
@@ -487,11 +708,43 @@ function ItemNameField({
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => {
-      window.removeEventListener("scroll", onScrollOrResize, true);
-      window.removeEventListener("resize", onScrollOrResize);
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [open]);
+  }, [open, minWidth, desiredMax]);
+
+  return { open, setOpen, pos, inputRef, dropdownRef };
+}
+
+// Field nama produk dengan dropdown custom (portal ke document.body).
+function ItemNameField({
+  editable,
+  value,
+  onChange,
+}: {
+  editable: boolean;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const { open, setOpen, pos, inputRef, dropdownRef } = useFloatingList(
+    220,
+    256,
+  );
+
+  const results = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const source = q
+      ? ALL_PRODUCTS.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.code.toLowerCase().includes(q),
+        )
+      : ALL_PRODUCTS;
+    return source.slice(0, 8);
+  }, [value]);
 
   if (!editable) {
     if (!value) return null;
@@ -517,8 +770,14 @@ function ItemNameField({
         createPortal(
           <div
             ref={dropdownRef}
-            className="no-print fixed z-[999] bg-white border border-line rounded-lg shadow-lg max-h-64 overflow-y-auto"
-            style={{ top: pos.top, left: pos.left, width: pos.width }}
+            className="no-print fixed z-[999] bg-white border border-line rounded-lg shadow-lg overflow-y-auto"
+            style={{
+              top: pos.top,
+              bottom: pos.bottom,
+              left: pos.left,
+              width: pos.width,
+              maxHeight: pos.maxHeight,
+            }}
           >
             {results.map((p) => (
               <button
@@ -529,7 +788,7 @@ function ItemNameField({
                   onChange(p.name);
                   setOpen(false);
                 }}
-                className="w-full text-left px-3 py-2 text-sm hover:bg-sand"
+                className="w-full text-left px-3 py-2.5 lg:py-2 text-sm hover:bg-sand"
               >
                 <span className="font-medium">{p.name}</span>{" "}
                 <span className="text-ink/40 font-data text-xs">{p.code}</span>
@@ -552,10 +811,10 @@ function UnitField({
   value: string;
   onChange: (v: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 140 });
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const { open, setOpen, pos, inputRef, dropdownRef } = useFloatingList(
+    120,
+    224,
+  );
 
   const results = useMemo(() => {
     const q = value.trim().toLowerCase();
@@ -563,37 +822,6 @@ function UnitField({
       ? UNIT_SUGGESTIONS.filter((u) => u.toLowerCase().includes(q))
       : UNIT_SUGGESTIONS;
   }, [value]);
-
-  const updatePosition = () => {
-    const el = inputRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    setPos({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 120) });
-  };
-
-  useEffect(() => {
-    if (!open) return;
-    updatePosition();
-    const onScrollOrResize = () => updatePosition();
-    window.addEventListener("scroll", onScrollOrResize, true);
-    window.addEventListener("resize", onScrollOrResize);
-    const handleClickOutside = (e: MouseEvent) => {
-      if (
-        inputRef.current &&
-        !inputRef.current.contains(e.target as Node) &&
-        dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      window.removeEventListener("scroll", onScrollOrResize, true);
-      window.removeEventListener("resize", onScrollOrResize);
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, [open]);
 
   if (!editable) {
     if (!value) return null;
@@ -619,8 +847,14 @@ function UnitField({
         createPortal(
           <div
             ref={dropdownRef}
-            className="no-print fixed z-[999] bg-white border border-line rounded-lg shadow-lg max-h-56 overflow-y-auto"
-            style={{ top: pos.top, left: pos.left, width: pos.width }}
+            className="no-print fixed z-[999] bg-white border border-line rounded-lg shadow-lg overflow-y-auto"
+            style={{
+              top: pos.top,
+              bottom: pos.bottom,
+              left: pos.left,
+              width: pos.width,
+              maxHeight: pos.maxHeight,
+            }}
           >
             {results.map((u) => (
               <button
@@ -631,7 +865,7 @@ function UnitField({
                   onChange(u);
                   setOpen(false);
                 }}
-                className="w-full text-left px-3 py-2 text-sm hover:bg-sand"
+                className="w-full text-left px-3 py-2.5 lg:py-2 text-sm hover:bg-sand"
               >
                 {u}
               </button>
@@ -643,13 +877,169 @@ function UnitField({
   );
 }
 
-// ── Dokumen bersama — dipakai DUA KALI: sekali editable (canvas layar),
-// sekali non-editable (versi export tersembunyi buat PDF/print). ─────────
+// Dialog konfirmasi (hapus SJ, keluar). Tombol setinggi 44px biar aman
+// disentuh jari.
+function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onCancel]);
+
+  if (!open) return null;
+  return (
+    <div
+      className="no-print fixed inset-0 z-[300] flex items-center justify-center p-4 bg-ink/50"
+      onClick={onCancel}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        className="w-full max-w-sm bg-white rounded-2xl shadow-2xl p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-base font-semibold text-ink">{title}</p>
+        <p className="text-sm text-ink/60 mt-1.5 leading-relaxed">{message}</p>
+        <div className="flex gap-2 mt-5">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="flex-1 min-h-11 rounded-lg border border-line text-sm font-medium text-ink/70 hover:bg-sand"
+          >
+            Batal
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="flex-1 min-h-11 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Inset bawah akibat keyboard (selisih layout viewport vs visual viewport),
+// supaya bottom sheet naik di atas keyboard dan tidak ketutup.
+function useViewportInset() {
+  const [state, setState] = useState({ inset: 0, height: 0 });
+  useEffect(() => {
+    const vv = window.visualViewport;
+    const update = () => {
+      const h = vv ? vv.height : window.innerHeight;
+      const top = vv ? vv.offsetTop : 0;
+      setState({
+        inset: Math.max(window.innerHeight - h - top, 0),
+        height: h,
+      });
+    };
+    update();
+    vv?.addEventListener("resize", update);
+    vv?.addEventListener("scroll", update);
+    window.addEventListener("resize", update);
+    return () => {
+      vv?.removeEventListener("resize", update);
+      vv?.removeEventListener("scroll", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
+  return state;
+}
+
+function BottomSheetInner({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const { inset, height } = useViewportInset();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="no-print fixed inset-0 z-[250]">
+      <div className="absolute inset-0 bg-ink/40" onClick={onClose} />
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="sheet-up absolute left-0 right-0 bg-white rounded-t-2xl shadow-2xl flex flex-col"
+        style={{
+          bottom: inset,
+          maxHeight: height ? height * 0.88 : "88%",
+        }}
+      >
+        <div className="shrink-0 flex items-center justify-between pl-4 pr-2 border-b border-line">
+          <span className="text-sm font-semibold text-ink">{title}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="min-h-12 px-4 text-sm font-semibold text-ink"
+          >
+            Selesai
+          </button>
+        </div>
+        <div className="sheet-body flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BottomSheet({
+  open,
+  title,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  title: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  if (!open) return null;
+  return (
+    <BottomSheetInner title={title} onClose={onClose}>
+      {children}
+    </BottomSheetInner>
+  );
+}
+
+// ── Dokumen bersama — dipakai TIGA cara: editable (canvas desktop),
+// non-editable + onEdit (layar utama HP: ketuk bagian untuk edit lewat
+// bottom sheet), dan non-editable biasa (preview + versi export). ───────
 function InvoiceDocument({
   editable,
+  onEdit,
   docType,
   company,
-  setCompany,
   customerName,
   onCustomerNameChange,
   customer,
@@ -660,6 +1050,8 @@ function InvoiceDocument({
   documentDate,
   dueDate,
   topLabel,
+  poNumber,
+  grCode,
   items,
   updateItem,
   removeItem,
@@ -673,425 +1065,538 @@ function InvoiceDocument({
   signerName,
   signerTitle,
   showStamp,
+  showLogo,
+  showMateraiBox,
+  showSjStamp,
   taxRate,
   taxAmount,
   shippingAddress,
-  setShippingAddress,
+  updateShipTo,
   sjRows,
   updateSjItem,
 }: any) {
   const isSJ = docType === "suratJalan";
   const hasCompanyContact = Boolean(company.phone || company.email);
 
+  // Mode ketuk-untuk-edit (HP). Tiap bagian dibungkus area yang bisa diketuk
+  // dan diberi outline tipis. Di mode lain props-nya cuma className biasa.
+  const tapMode = Boolean(onEdit);
+  const tp = (section: string, cls = "") =>
+    tapMode
+      ? {
+          role: "button" as const,
+          onClick: () => onEdit(section),
+          className: `${cls} cursor-pointer rounded-lg p-1.5 ring-2 ring-ink/10 active:bg-ink/5`,
+        }
+      : { className: cls };
+
   return (
     <div className="relative bg-white p-6 md:p-10 overflow-hidden w-[780px] export-page">
-      <Watermark />
-
-      <div className="relative z-10 flex items-start justify-between gap-4 mb-8">
-        <div className="flex items-start gap-3">
-          <Logomark unoptimized />
-          <div>
-            <Field
-              editable={editable}
-              value={company.address}
-              onChange={(v: string) =>
-                setCompany((c: any) => ({ ...c, address: v }))
-              }
-              multiline
-              widthClass="w-48"
-              className="text-xs text-ink/50"
-            />
-            {editable ? (
-              <div className="text-xs text-ink/50 mt-1">
-                {company.phone} · {company.email}
-              </div>
-            ) : (
-              hasCompanyContact && (
-                <div className="text-xs text-ink/50 mt-1">
-                  {[company.phone, company.email].filter(Boolean).join(" · ")}
+      {/* Kop dibungkus latar putih penuh (sampai tepi halaman) supaya
+          watermark tidak kelihatan di area kop; terpotong di garis merah. */}
+      <div className="relative z-10 bg-white -mx-6 md:-mx-10 -mt-6 md:-mt-10 px-6 md:px-10 pt-6 md:pt-10">
+        {/* ── HEADER: identitas di kiri, judul + nomor di kanan ── */}
+        <div className="relative z-10 flex items-center justify-between gap-4 mb-4">
+          <div className="flex items-center gap-3">
+            {showLogo && <Logomark unoptimized markOnly />}
+            <div>
+              <p className="font-display text-xl text-ink leading-tight whitespace-nowrap">
+                Makmur A3&apos;S
+              </p>
+              <p className="font-data text-[10px] uppercase tracking-[0.2em] text-ink/45 leading-tight mt-0.5">
+                Supply &amp; Packaging
+              </p>
+              {hasCompanyContact && (
+                <div className="text-xs text-ink/50 mt-1.5 leading-relaxed">
+                  {company.phone && <p>{company.phone}</p>}
+                  {company.email && <p>{company.email}</p>}
                 </div>
-              )
+              )}
+            </div>
+          </div>
+
+          <div {...tp("info", "text-right shrink-0")}>
+            <h2 className="font-display text-2xl text-brand whitespace-nowrap tracking-wide">
+              {isSJ ? "SURAT JALAN" : "INVOICE"}
+            </h2>
+            {isSJ ? (
+              <p className="text-sm font-data mt-1 whitespace-nowrap">
+                {suratJalanNumber}
+              </p>
+            ) : (
+              <Field
+                editable={editable}
+                value={invoiceNumber}
+                onChange={onInvoiceNumberChange}
+                className="text-sm font-data mt-1 text-right"
+              />
             )}
           </div>
         </div>
-        <div className="text-right shrink-0">
-          <h2 className="font-display text-xl text-brand whitespace-nowrap">
-            {isSJ ? "SURAT JALAN" : "INVOICE"}
-          </h2>
-          {isSJ ? (
-            <p className="text-sm font-data mt-1 whitespace-nowrap">
-              {suratJalanNumber}
+
+        {/* Garis pemisah brand */}
+        <div className="relative z-10 h-[2px] bg-brand" />
+      </div>
+
+      <div className="h-6" />
+
+      {/* Body: watermark di tengah body (di bawah kop). minHeight menjamin
+          tinggi cukup supaya watermark utuh, tidak terpotong, walau isi
+          dokumen pendek (misal surat jalan 1 barang). */}
+      <div className="relative" style={{ minHeight: 360 }}>
+        <Watermark />
+
+        {/* Billing/shipping di kiri, meta dokumen di kanan */}
+        <div className="relative z-10 mb-8 flex items-start justify-between gap-6">
+          <div {...tp("customer", "flex-1 min-w-0")}>
+            <p className="text-xs uppercase tracking-widest text-ink/40 mb-1">
+              {isSJ ? "Kirim ke" : "Ditagihkan kepada"}
             </p>
-          ) : (
-            <Field
-              editable={editable}
-              value={invoiceNumber}
-              onChange={onInvoiceNumberChange}
-              className="text-sm font-data mt-1 text-right"
-            />
-          )}
-          <p className="text-xs text-ink/50 mt-1 whitespace-nowrap">
-            Tanggal: {documentDate}
-          </p>
-          {!isSJ && (
-            <>
-              <p className="text-xs text-ink/50 whitespace-nowrap">
-                Termin: {topLabel}
-              </p>
-              <p className="text-xs text-ink/50 whitespace-nowrap">
-                Jatuh tempo: {dueDate}
-              </p>
-            </>
-          )}
-          {isSJ && (
-            <div className="text-xs text-ink/50 mt-2 leading-relaxed">
-              <span className="block">Referensi Invoice</span>
-              <span className="block font-data text-ink/70 whitespace-nowrap">
-                {invoiceNumber}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Billing address (invoice) vs shipping address (surat jalan) */}
-      <div className="relative z-10 mb-8">
-        <p className="text-xs uppercase tracking-widest text-ink/40 mb-1">
-          {isSJ ? "Kirim ke" : "Ditagihkan kepada"}
-        </p>
-        {isSJ && shippingAddress.sameAsCustomer ? (
-          <>
-            <Field
-              editable={false}
-              value={customerName}
-              placeholder="Nama customer"
-              className="text-sm font-semibold"
-            />
-            <Field
-              editable={false}
-              value={customer.address}
-              placeholder="Alamat"
-              className="text-xs text-ink/60 mt-1"
-            />
-            {customer.phone && (
-              <p className="text-xs text-ink/60 mt-1">{customer.phone}</p>
+            {isSJ && shippingAddress.sameAsCustomer ? (
+              <>
+                <Field
+                  editable={false}
+                  value={customerName}
+                  placeholder="Nama customer"
+                  showPlaceholder={tapMode}
+                  className="text-sm font-semibold"
+                />
+                <Field
+                  editable={false}
+                  value={customer.address}
+                  placeholder="Alamat"
+                  showPlaceholder={tapMode}
+                  className="text-xs text-ink/60 mt-1"
+                />
+                {customer.phone && (
+                  <p className="text-xs text-ink/60 mt-1">{customer.phone}</p>
+                )}
+              </>
+            ) : isSJ ? (
+              <>
+                <Field
+                  editable={editable}
+                  value={shippingAddress.name}
+                  onChange={(v: string) => updateShipTo({ name: v })}
+                  placeholder="Nama penerima / gudang / outlet"
+                  showPlaceholder={tapMode}
+                  className="text-sm font-semibold"
+                />
+                <Field
+                  editable={editable}
+                  value={shippingAddress.address}
+                  onChange={(v: string) => updateShipTo({ address: v })}
+                  placeholder="Alamat pengiriman"
+                  showPlaceholder={tapMode}
+                  multiline
+                  className="text-xs text-ink/60 mt-1"
+                />
+                <Field
+                  editable={editable}
+                  value={shippingAddress.phone}
+                  onChange={(v: string) => updateShipTo({ phone: v })}
+                  placeholder="No. HP penerima"
+                  showPlaceholder={tapMode}
+                  widthClass="w-40"
+                  className="text-xs text-ink/60 mt-1"
+                />
+              </>
+            ) : (
+              <>
+                <Field
+                  editable={editable}
+                  value={customerName}
+                  onChange={onCustomerNameChange}
+                  placeholder="Nama customer"
+                  showPlaceholder={tapMode}
+                  className="text-sm font-semibold"
+                />
+                <Field
+                  editable={editable}
+                  value={customer.address}
+                  onChange={(v: string) =>
+                    setCustomer((c: any) => ({ ...c, address: v }))
+                  }
+                  placeholder="Alamat"
+                  showPlaceholder={tapMode}
+                  multiline
+                  className="text-xs text-ink/60 mt-1"
+                />
+                {(editable || tapMode || customer.phone || customer.email) && (
+                  <div className="flex gap-3 mt-1">
+                    <Field
+                      editable={editable}
+                      value={customer.phone}
+                      onChange={(v: string) =>
+                        setCustomer((c: any) => ({ ...c, phone: v }))
+                      }
+                      placeholder="No. HP"
+                      showPlaceholder={tapMode}
+                      widthClass="w-32"
+                      className="text-xs text-ink/60"
+                    />
+                    <Field
+                      editable={editable}
+                      value={customer.email}
+                      onChange={(v: string) =>
+                        setCustomer((c: any) => ({ ...c, email: v }))
+                      }
+                      placeholder="Email"
+                      showPlaceholder={tapMode}
+                      widthClass="w-44"
+                      className="text-xs text-ink/60"
+                    />
+                  </div>
+                )}
+              </>
             )}
-          </>
-        ) : isSJ ? (
-          <>
-            <Field
-              editable={editable}
-              value={shippingAddress.name}
-              onChange={(v: string) =>
-                setShippingAddress((s: any) => ({ ...s, name: v }))
-              }
-              placeholder="Nama penerima / gudang / outlet"
-              className="text-sm font-semibold"
-            />
-            <Field
-              editable={editable}
-              value={shippingAddress.address}
-              onChange={(v: string) =>
-                setShippingAddress((s: any) => ({ ...s, address: v }))
-              }
-              placeholder="Alamat pengiriman"
-              multiline
-              className="text-xs text-ink/60 mt-1"
-            />
-            <Field
-              editable={editable}
-              value={shippingAddress.phone}
-              onChange={(v: string) =>
-                setShippingAddress((s: any) => ({ ...s, phone: v }))
-              }
-              placeholder="No. HP penerima"
-              widthClass="w-40"
-              className="text-xs text-ink/60 mt-1"
-            />
-          </>
-        ) : (
-          <>
-            <Field
-              editable={editable}
-              value={customerName}
-              onChange={onCustomerNameChange}
-              placeholder="Nama customer"
-              className="text-sm font-semibold"
-            />
-            <Field
-              editable={editable}
-              value={customer.address}
-              onChange={(v: string) =>
-                setCustomer((c: any) => ({ ...c, address: v }))
-              }
-              placeholder="Alamat"
-              multiline
-              className="text-xs text-ink/60 mt-1"
-            />
-            {(editable || customer.phone || customer.email) && (
-              <div className="flex gap-3 mt-1">
-                <Field
-                  editable={editable}
-                  value={customer.phone}
-                  onChange={(v: string) =>
-                    setCustomer((c: any) => ({ ...c, phone: v }))
-                  }
-                  placeholder="No. HP"
-                  widthClass="w-32"
-                  className="text-xs text-ink/60"
-                />
-                <Field
-                  editable={editable}
-                  value={customer.email}
-                  onChange={(v: string) =>
-                    setCustomer((c: any) => ({ ...c, email: v }))
-                  }
-                  placeholder="Email"
-                  widthClass="w-44"
-                  className="text-xs text-ink/60"
-                />
+          </div>
+
+          {/* Kolom meta kanan — min-w (bukan w tetap) supaya nomor referensi
+            panjang tetap satu baris; kolom alamat di kiri yang mengalah. */}
+          <div {...tp("info", "shrink-0 min-w-52 text-xs")}>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between gap-3">
+                <span className="text-ink/40">
+                  {isSJ ? "Tgl. Kirim" : "Tanggal"}
+                </span>
+                <span className="text-ink/80 whitespace-nowrap">
+                  {documentDate}
+                </span>
               </div>
-            )}
-          </>
-        )}
-      </div>
-
-      <div className="relative z-10 overflow-x-auto mb-6">
-        <table className="w-full text-sm min-w-[480px]">
-          <thead>
-            <tr className="border-b border-ink/20 text-left text-xs uppercase tracking-wide text-ink/40">
-              <th className="py-2">Produk</th>
-              <th className="py-2 text-right">
-                {isSJ ? "Qty Dikirim" : "Qty"}
-              </th>
-              <th className="py-2 text-right">Satuan</th>
-              {!isSJ && <th className="py-2 text-right">Harga</th>}
-              {!isSJ && <th className="py-2 text-right">Subtotal</th>}
-              {editable && !isSJ && <th className="py-2 no-print" />}
-              {editable && isSJ && (
-                <th className="py-2 text-right no-print">Kirim?</th>
+              {!isSJ && (
+                <>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-ink/40">Termin</span>
+                    <span className="text-ink/80 whitespace-nowrap">
+                      {topLabel}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-ink/40">Jatuh tempo</span>
+                    <span className="text-ink/80 whitespace-nowrap">
+                      {dueDate}
+                    </span>
+                  </div>
+                  {poNumber && (
+                    <div className="flex justify-between gap-3">
+                      <span className="text-ink/40 whitespace-nowrap">
+                        No. PO
+                      </span>
+                      <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                        {poNumber}
+                      </span>
+                    </div>
+                  )}
+                </>
               )}
-            </tr>
-          </thead>
-          <tbody>
-            {isSJ
-              ? sjRows.map((it: any) => (
-                  <tr
-                    key={it.id}
-                    className={`border-b border-line ${!it.included ? "opacity-40" : ""}`}
-                  >
-                    <td className="py-2 pr-2">{it.name}</td>
-                    <td className="py-2 text-right">
-                      {editable ? (
-                        <input
-                          type="number"
-                          min={0}
-                          max={it.maxAllowed}
-                          value={it.shippedQty}
-                          onChange={(e) =>
-                            updateSjItem(it.id, {
-                              qty: Number(e.target.value),
-                            })
-                          }
-                          className="w-16 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none text-right"
-                        />
-                      ) : (
-                        <span>{it.shippedQty}</span>
-                      )}
-                      {it.shippedQty < it.qty && (
-                        <span className="block text-[10px] text-brand">
-                          dari {it.qty} {it.unit} (parsial)
-                        </span>
-                      )}
-                      {it.remainingAfterThis > 0 && (
-                        <span className="block text-[10px] text-ink/40">
-                          sisa {it.remainingAfterThis} {it.unit} belum dikirim
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 text-right">{it.unit}</td>
-                    {editable && (
-                      <td className="py-2 pl-1 no-print text-right">
-                        <label className="inline-flex items-center gap-1 text-[10px] text-ink/50">
+              {isSJ && (
+                <>
+                  <div className="flex justify-between gap-3">
+                    <span className="text-ink/40 whitespace-nowrap">
+                      Ref. Invoice
+                    </span>
+                    <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                      {invoiceNumber}
+                    </span>
+                  </div>
+                  {/* No. PO milik invoice: tampil di SJ hanya kalau diisi. */}
+                  {poNumber && (
+                    <div className="flex justify-between gap-3">
+                      <span className="text-ink/40 whitespace-nowrap">
+                        No. PO
+                      </span>
+                      <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                        {poNumber}
+                      </span>
+                    </div>
+                  )}
+                  {/* Kode GR milik surat jalan: SELALU tampil. Kalau kosong,
+                    diberi garis titik-titik supaya bisa ditulis tangan.
+                    borderBottom inline (aman untuk html2canvas). */}
+                  <div className="flex justify-between items-end gap-3">
+                    <span className="text-ink/40 whitespace-nowrap">
+                      Kode GR
+                    </span>
+                    <span
+                      className="font-data text-ink/80 text-right whitespace-nowrap inline-block min-w-[110px] h-4"
+                      style={
+                        grCode
+                          ? undefined
+                          : { borderBottom: "1px dotted rgba(0,0,0,0.4)" }
+                      }
+                    >
+                      {grCode}
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div
+          {...tp(
+            isSJ ? "barang" : "item",
+            "relative z-10 overflow-x-auto mb-6",
+          )}
+        >
+          <table className="w-full text-sm min-w-[480px]">
+            <thead>
+              <tr className="border-b border-ink/20 text-left text-xs uppercase tracking-wide text-ink/40">
+                <th className="py-2">Produk</th>
+                <th className="py-2 text-right">
+                  {isSJ ? "Qty Dikirim" : "Qty"}
+                </th>
+                <th className="py-2 text-right">Satuan</th>
+                {!isSJ && <th className="py-2 text-right">Harga</th>}
+                {!isSJ && <th className="py-2 text-right">Subtotal</th>}
+                {editable && !isSJ && <th className="py-2 no-print" />}
+                {editable && isSJ && (
+                  <th className="py-2 text-right no-print">Kirim?</th>
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {isSJ
+                ? sjRows.map((it: any) => (
+                    <tr
+                      key={it.id}
+                      className={`border-b border-line ${!it.included ? "opacity-40" : ""}`}
+                    >
+                      <td className="py-2 pr-2">{it.name}</td>
+                      <td className="py-2 text-right">
+                        {editable ? (
                           <input
-                            type="checkbox"
-                            checked={it.included}
+                            type="number"
+                            min={0}
+                            max={it.maxAllowed}
+                            value={it.shippedQty}
                             onChange={(e) =>
                               updateSjItem(it.id, {
-                                included: e.target.checked,
+                                qty: Number(e.target.value),
                               })
                             }
+                            className="w-16 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none text-right"
                           />
-                          Kirim
-                        </label>
+                        ) : (
+                          <span>{it.shippedQty}</span>
+                        )}
+                        {it.shippedQty < it.qty && (
+                          <span className="block text-[10px] text-brand">
+                            dari {it.qty} {it.unit} (parsial)
+                          </span>
+                        )}
+                        {it.remainingAfterThis > 0 && (
+                          <span className="block text-[10px] text-ink/40">
+                            sisa {it.remainingAfterThis} {it.unit} belum dikirim
+                          </span>
+                        )}
                       </td>
-                    )}
-                  </tr>
-                ))
-              : items.map((it: LineItem) => (
-                  <tr key={it.id} className="border-b border-line">
-                    <td className="py-2 pr-2">
-                      <ItemNameField
-                        editable={editable}
-                        value={it.name}
-                        onChange={(v: string) => updateItem(it.id, { name: v })}
-                      />
-                    </td>
-                    <td className="py-2 text-right">
-                      <Field
-                        editable={editable}
-                        type="number"
-                        value={String(it.qty)}
-                        onChange={(v: string) =>
-                          updateItem(it.id, { qty: Number(v) })
-                        }
-                        widthClass="w-14"
-                        className="text-right"
-                      />
-                    </td>
-                    <td className="py-2 text-right">
-                      <UnitField
-                        editable={editable}
-                        value={it.unit}
-                        onChange={(v: string) => updateItem(it.id, { unit: v })}
-                      />
-                    </td>
-                    <td className="py-2 text-right">
-                      {editable ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <span className="text-ink/40 text-xs">Rp</span>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            value={it.price ? formatNumber(it.price) : ""}
-                            onChange={(e) =>
-                              updateItem(it.id, {
-                                price: parseNumberInput(e.target.value),
-                              })
-                            }
-                            placeholder="0"
-                            className="w-24 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors text-right"
-                          />
-                        </div>
-                      ) : (
-                        <span>Rp {formatNumber(it.price)}</span>
+                      <td className="py-2 text-right">{it.unit}</td>
+                      {editable && (
+                        <td className="py-2 pl-1 no-print text-right">
+                          <label className="inline-flex items-center gap-1 text-[10px] text-ink/50">
+                            <input
+                              type="checkbox"
+                              checked={it.included}
+                              onChange={(e) =>
+                                updateSjItem(it.id, {
+                                  included: e.target.checked,
+                                })
+                              }
+                            />
+                            Kirim
+                          </label>
+                        </td>
                       )}
-                    </td>
-                    <td className="py-2 text-right">
-                      {currency(it.qty * it.price)}
-                    </td>
-                    {editable && (
-                      <td className="py-2 pl-1 no-print">
-                        <button
-                          onClick={() => removeItem(it.id)}
-                          aria-label="Hapus baris"
-                        >
-                          <Trash2 className="w-3.5 h-3.5 text-ink/30 hover:text-brand" />
-                        </button>
+                    </tr>
+                  ))
+                : items.map((it: LineItem) => (
+                    <tr key={it.id} className="border-b border-line">
+                      <td className="py-2 pr-2">
+                        <ItemNameField
+                          editable={editable}
+                          value={it.name}
+                          onChange={(v: string) =>
+                            updateItem(it.id, { name: v })
+                          }
+                        />
                       </td>
-                    )}
-                  </tr>
-                ))}
-          </tbody>
-        </table>
-        {editable && !isSJ && (
-          <button
-            onClick={addItem}
-            className="no-print mt-2 flex items-center gap-1.5 text-xs text-ink/50 hover:text-ink"
-          >
-            <Plus className="w-3.5 h-3.5" /> Tambah baris
-          </button>
-        )}
-      </div>
-
-      {!isSJ && (
-        <div className="relative z-10 flex justify-end mb-10">
-          <div className="w-64 flex flex-col gap-1.5 text-sm">
-            <div className="flex justify-between">
-              <span className="text-ink/60">Subtotal</span>
-              <span>{currency(subtotal)}</span>
-            </div>
-            {discountAmount > 0 && (
-              <div className="flex justify-between text-brand">
-                <span>Diskon</span>
-                <span>-{currency(discountAmount)}</span>
-              </div>
-            )}
-            {taxAmount > 0 && (
-              <div className="flex justify-between">
-                <span className="text-ink/60">PPN {taxRate}%</span>
-                <span>{currency(taxAmount)}</span>
-              </div>
-            )}
-            {shippingCost > 0 && (
-              <div className="flex justify-between">
-                <span className="text-ink/60">Ongkir</span>
-                <span>{currency(shippingCost)}</span>
-              </div>
-            )}
-            <div className="flex justify-between font-semibold text-base pt-1.5 border-t border-ink/20">
-              <span>Total</span>
-              <span>{currency(grandTotal)}</span>
-            </div>
-          </div>
+                      <td className="py-2 text-right">
+                        <Field
+                          editable={editable}
+                          type="number"
+                          value={String(it.qty)}
+                          onChange={(v: string) =>
+                            updateItem(it.id, { qty: Number(v) })
+                          }
+                          widthClass="w-14"
+                          className="text-right"
+                        />
+                      </td>
+                      <td className="py-2 text-right">
+                        <UnitField
+                          editable={editable}
+                          value={it.unit}
+                          onChange={(v: string) =>
+                            updateItem(it.id, { unit: v })
+                          }
+                        />
+                      </td>
+                      <td className="py-2 text-right">
+                        {editable ? (
+                          <div className="flex items-center justify-end gap-1">
+                            <span className="text-ink/40 text-xs">Rp</span>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              value={it.price ? formatNumber(it.price) : ""}
+                              onChange={(e) =>
+                                updateItem(it.id, {
+                                  price: parseNumberInput(e.target.value),
+                                })
+                              }
+                              placeholder="0"
+                              className="w-24 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors text-right"
+                            />
+                          </div>
+                        ) : (
+                          <span>Rp {formatNumber(it.price)}</span>
+                        )}
+                      </td>
+                      <td className="py-2 text-right">
+                        {currency(it.qty * it.price)}
+                      </td>
+                      {editable && (
+                        <td className="py-2 pl-1 no-print">
+                          <button
+                            onClick={() => removeItem(it.id)}
+                            aria-label="Hapus baris"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-ink/30 hover:text-brand" />
+                          </button>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+            </tbody>
+          </table>
+          {editable && !isSJ && (
+            <button
+              onClick={addItem}
+              className="no-print mt-2 flex items-center gap-1.5 text-xs text-ink/50 hover:text-ink"
+            >
+              <Plus className="w-3.5 h-3.5" /> Tambah baris
+            </button>
+          )}
         </div>
-      )}
 
-      {isSJ ? (
-        <div className="relative z-10 flex items-end justify-between gap-8 mt-10">
-          <div className="flex flex-col items-center gap-1 w-32">
-            <div className="h-16" />
-            <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-              Pengirim
-            </div>
-          </div>
-          <div className="flex flex-col items-center gap-1 w-32">
-            <div className="h-16" />
-            <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-              Penerima
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="relative z-10 flex items-end justify-between gap-8">
-          <div className="text-xs text-ink/60 max-w-[260px]">
-            <p className="font-semibold text-ink mb-1">Pembayaran ke:</p>
-            <p>{bank.bankName}</p>
-            <p>{bank.accountNumber}</p>
-            <p>a.n. {bank.accountHolder}</p>
-          </div>
-
-          {/* Blok tanda tangan: tanda tangan di lapisan bawah, cap di lapisan
-              atas dan menimpa tanda tangan. Cap bisa dimatikan lewat toggle
-              di tab TTD. Nama dan jabatan opsional. */}
-          <div className="flex flex-col items-center gap-1">
-            <p className="text-xs text-ink/60">Hormat kami,</p>
-            <div className="relative w-40 h-20">
-              {signatureUrl && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={signatureUrl}
-                  alt="Tanda tangan"
-                  className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
-                />
-              )}
-              {showStamp && (
-                <div className="absolute left-8 bottom-0 z-10">
-                  <InvoiceStamp />
+        {!isSJ && (
+          <div className="relative z-10 flex justify-end mb-10">
+            <div {...tp("diskon", "w-64 flex flex-col gap-1.5 text-sm")}>
+              <div className="flex justify-between">
+                <span className="text-ink/60">Subtotal</span>
+                <span>{currency(subtotal)}</span>
+              </div>
+              {discountAmount > 0 && (
+                <div className="flex justify-between text-brand">
+                  <span>Diskon</span>
+                  <span>-{currency(discountAmount)}</span>
                 </div>
               )}
-            </div>
-            <div className="w-40 border-t border-ink/30 pt-1 text-center">
-              <p className="text-xs font-semibold text-ink/70">
-                {signerName || "Makmur A3'S"}
-              </p>
-              {signerTitle && (
-                <p className="text-[11px] text-ink/50">{signerTitle}</p>
+              {taxAmount > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-ink/60">PPN {taxRate}%</span>
+                  <span>{currency(taxAmount)}</span>
+                </div>
               )}
+              {shippingCost > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-ink/60">Ongkir</span>
+                  <span>{currency(shippingCost)}</span>
+                </div>
+              )}
+              <div className="flex justify-between font-semibold text-base pt-1.5 border-t border-ink/20">
+                <span>Total</span>
+                <span>{currency(grandTotal)}</span>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+
+        {isSJ ? (
+          <div className="relative z-10 flex items-end justify-between gap-8 mt-10">
+            <div className="flex flex-col items-center gap-1 w-32">
+              <div className="relative w-full h-16">
+                {showSjStamp && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <InvoiceStamp />
+                  </div>
+                )}
+              </div>
+              <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
+                Pengirim
+              </div>
+            </div>
+            <div className="flex flex-col items-center gap-1 w-32">
+              <div className="h-16" />
+              <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
+                Penerima
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="relative z-10 flex items-end justify-between gap-8">
+            <div {...tp("rekening", "text-xs text-ink/60 max-w-[260px]")}>
+              <p className="font-semibold text-ink mb-1">Pembayaran ke:</p>
+              <p>{bank.bankName}</p>
+              <p>{bank.accountNumber}</p>
+              <p>a.n. {bank.accountHolder}</p>
+            </div>
+
+            <div {...tp("ttd", "flex items-end gap-3")}>
+              {/* Kotak materai opsional — tempat nempel materai manual. */}
+              {showMateraiBox && (
+                <div className="w-20 h-14 mb-8 border border-dashed border-ink/40 flex flex-col items-center justify-center text-center text-[9px] leading-tight text-ink/40">
+                  <span>Tempel</span>
+                  <span>Materai</span>
+                </div>
+              )}
+
+              {/* Blok tanda tangan: tanda tangan di lapisan bawah, cap di lapisan
+                atas dan menimpa tanda tangan. Cap bisa dimatikan lewat toggle
+                di tab TTD. Nama dan jabatan opsional. */}
+              <div className="flex flex-col items-center gap-1">
+                <p className="text-xs text-ink/60">Hormat kami,</p>
+                <div className="relative w-40 h-20">
+                  {signatureUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={signatureUrl}
+                      alt="Tanda tangan"
+                      className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
+                    />
+                  )}
+                  {showStamp && (
+                    <div className="absolute left-2 bottom-1.5 z-10">
+                      <InvoiceStamp />
+                    </div>
+                  )}
+                </div>
+                <div className="w-40 border-t border-ink/30 pt-1 text-center">
+                  <p className="text-xs font-semibold text-ink/70">
+                    {signerName || "Makmur A3'S"}
+                  </p>
+                  {signerTitle && (
+                    <p className="text-[11px] text-ink/50">{signerTitle}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1099,7 +1604,7 @@ function InvoiceDocument({
 // Ukuran layout asli sebuah elemen. transform: scale() gak ngubah ukuran layout,
 // jadi dokumen 780px yang di-scale kecil tetep bikin area scroll selebar 780px
 // dan sisi kirinya kepotong di layar sempit. Ukuran ini dipakai buat bikin
-// pembungkus yang ukurannya ikut skala.
+// pembungkus yang ukurannya ikut skala. `active` = elemennya sedang dirender.
 function useElementSize(
   ref: React.RefObject<HTMLElement | null>,
   active = true,
@@ -1124,10 +1629,28 @@ export default function InvoiceGenerator() {
   const exportRef = useRef<HTMLDivElement>(null);
   const previewWrapRef = useRef<HTMLDivElement>(null);
   const previewPageRef = useRef<HTMLDivElement>(null);
+  const mobileWrapRef = useRef<HTMLDivElement>(null);
+  const mobilePageRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState<"pdf" | "share" | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
 
-  const [mobileView, setMobileView] = useState<"edit" | "preview">("edit");
+  // Portal area export tidak boleh dirender saat SSR.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
+  // Layout desktop (>= lg) vs HP/tablet. Yang tidak dipakai tidak dirender
+  // sama sekali, jadi form tidak pernah ada dua kali di DOM.
+  const [isDesktop, setIsDesktop] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const update = () => setIsDesktop(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
+  const showDesktop = mounted && isDesktop;
+  const showMobile = mounted && !isDesktop;
+
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [docType, setDocType] = useState<DocType>("invoice");
 
@@ -1153,6 +1676,8 @@ export default function InvoiceGenerator() {
         { id: "rekening", label: "Rekening", icon: Landmark },
         { id: "ttd", label: "TTD", icon: PenTool },
       );
+    } else {
+      base.push({ id: "barang", label: "Barang", icon: Package });
     }
     return base;
   }, [docType]);
@@ -1169,11 +1694,23 @@ export default function InvoiceGenerator() {
     setIsMobile(/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent));
   }, []);
 
+  // Bottom sheet (HP): edit bagian dokumen, Bagikan, dan Pengaturan.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [shareSheetOpen, setShareSheetOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
+  const openSheet = (tab: string) => {
+    setActiveSidebarTab(tab);
+    setSheetOpen(true);
+  };
+
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const shareBtnRef = useRef<HTMLDivElement>(null);
 
   const [shareNotice, setShareNotice] = useState<{
     channel: "wa" | "email";
+    count: number;
   } | null>(null);
 
   useEffect(() => {
@@ -1195,14 +1732,17 @@ export default function InvoiceGenerator() {
   const [previewZoom, setPreviewZoom] = useState(1);
   const [previewAutoFit, setPreviewAutoFit] = useState(true);
   const [showFullPreview, setShowFullPreview] = useState(false);
-  const canvasSize = useElementSize(pageRef);
+  const [mobileZoom, setMobileZoom] = useState(0.5);
+  const canvasSize = useElementSize(pageRef, showDesktop);
   const previewSize = useElementSize(previewPageRef, showFullPreview);
+  const mobileSize = useElementSize(mobilePageRef, showMobile);
 
   const [company, setCompany] = useState(COMPANY_DEFAULT);
   const [customerName, setCustomerName] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState(autoInvoiceNumber(""));
   const [invoiceNumberTouched, setInvoiceNumberTouched] = useState(false);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
+  const [poNumber, setPoNumber] = useState("");
   const [topDays, setTopDays] = useState<number | null>(7);
   const [customTopDays, setCustomTopDays] = useState<number | "">("");
   const [dueDate, setDueDate] = useState(addDaysISO(todayISO(), 7));
@@ -1230,18 +1770,43 @@ export default function InvoiceGenerator() {
   const [signerTitle, setSignerTitle] = useState("");
   // Cap perusahaan bisa dimatikan (misal kalau pakai cap basah).
   const [showStamp, setShowStamp] = useState(true);
+  // Logo bisa dimatikan — kalau off, diganti nama perusahaan (teks).
+  const [showLogo, setShowLogo] = useState(true);
+  // Kotak kosong buat nempel materai manual — default mati.
+  const [showMateraiBox, setShowMateraiBox] = useState(false);
+  // Cap perusahaan di kolom "Pengirim" surat jalan — default mati (SJ
+  // biasanya ditandatangani/dicap basah saat serah terima).
+  const [showSjStamp, setShowSjStamp] = useState(false);
 
-  const [shippingAddress, setShippingAddress] = useState({
-    sameAsCustomer: true,
-    name: "",
-    address: "",
-    phone: "",
-  });
+  // Bundling invoice + surat jalan. Default mati, dan di-reset tiap pindah
+  // tab Invoice <-> Surat Jalan supaya artinya selalu jelas:
+  // - Tab Invoice: bundleOn = ikutkan SEMUA surat jalan yang ada barangnya.
+  // - Tab Surat Jalan: bundleOn = ikutkan Invoice (SJ-nya = SJ aktif).
+  //   Mau kirim satu SJ saja? Pilih SJ-nya di tab Surat Jalan.
+  const [bundleOn, setBundleOn] = useState(false);
+  // Kalau true dan ada >1 dokumen, PDF/share digabung jadi 1 file.
+  // Default false (file terpisah) karena invoice & SJ biasanya dipakai
+  // orang berbeda (finance vs gudang).
+  const [mergePdf, setMergePdf] = useState(false);
+
+  const resetBundle = () => {
+    setBundleOn(false);
+    setMergePdf(false);
+  };
 
   const initialShipmentId = useRef(uid()).current;
   const [shipments, setShipments] = useState<Shipment[]>(() =>
     recalcShipments(
-      [{ id: initialShipmentId, seq: 1, date: todayISO(), itemsById: {} }],
+      [
+        {
+          id: initialShipmentId,
+          seq: 1,
+          date: todayISO(),
+          grCode: "",
+          shipTo: { ...DEFAULT_SHIP_TO },
+          itemsById: {},
+        },
+      ],
       items,
     ),
   );
@@ -1252,6 +1817,17 @@ export default function InvoiceGenerator() {
     () => shipments.find((s) => s.id === activeShipmentId) ?? shipments[0],
     [shipments, activeShipmentId],
   );
+
+  // Alamat tujuan milik SJ yang sedang aktif + updater-nya.
+  const activeShipTo = activeShipment?.shipTo ?? DEFAULT_SHIP_TO;
+  const updateShipTo = (patch: Partial<ShipTo>) =>
+    setShipments((prev) =>
+      prev.map((s) =>
+        s.id === activeShipment?.id
+          ? { ...s, shipTo: { ...s.shipTo, ...patch } }
+          : s,
+      ),
+    );
 
   useEffect(() => {
     setShipments((prev) => recalcShipments(prev, items));
@@ -1308,10 +1884,18 @@ export default function InvoiceGenerator() {
     const nextSeq = shipments.length
       ? Math.max(...shipments.map((s) => s.seq)) + 1
       : 1;
+    const latestShipment = shipments.length
+      ? [...shipments].sort((a, b) => b.seq - a.seq)[0]
+      : undefined;
     const newShipment: Shipment = {
       id: newId,
       seq: nextSeq,
       date: todayISO(),
+      grCode: "",
+      // Alamat SJ baru = salinan alamat SJ terakhir (bisa diubah bebas).
+      shipTo: latestShipment
+        ? { ...latestShipment.shipTo }
+        : { ...DEFAULT_SHIP_TO },
       itemsById: {},
     };
     setShipments((prev) => recalcShipments([...prev, newShipment], items));
@@ -1322,7 +1906,19 @@ export default function InvoiceGenerator() {
     setShipments((prev) => {
       if (prev.length <= 1) return prev;
       const filtered = prev.filter((s) => s.id !== id);
-      const next = recalcShipments(filtered, items);
+      // Nomor SJ dirapatkan lagi supaya tidak bolong: hapus SJ #3 dari
+      // 1,2,3,4 -> sisanya jadi 1,2,3 (SJ #4 lama menjadi #3). Urutan seq
+      // lama dipertahankan, jadi alokasi FIFO qty tetap sama.
+      const seqById = new Map(
+        [...filtered]
+          .sort((a, b) => a.seq - b.seq)
+          .map((s, i) => [s.id, i + 1] as const),
+      );
+      const renumbered = filtered.map((s) => ({
+        ...s,
+        seq: seqById.get(s.id)!,
+      }));
+      const next = recalcShipments(renumbered, items);
       if (activeShipmentId === id) setActiveShipmentId(next[0].id);
       return next;
     });
@@ -1334,48 +1930,35 @@ export default function InvoiceGenerator() {
     );
   };
 
-  const sjRows = useMemo(() => {
-    if (!activeShipment) return [];
-    return items.map((it) => {
-      const entry = activeShipment.itemsById[it.id] ?? {
-        qty: 0,
-        included: false,
-        manuallyEdited: false,
-      };
-      const availableBefore = computeAvailableBefore(
-        shipments,
-        it.id,
-        activeShipment.seq,
-      );
-      const maxAllowed = Math.max(it.qty - availableBefore, 0);
-      const remainingAfterThis = Math.max(
-        it.qty - availableBefore - entry.qty,
-        0,
-      );
-      return {
-        ...it,
-        shippedQty: entry.qty,
-        included: entry.included,
-        maxAllowed,
-        remainingAfterThis,
-      };
-    });
-  }, [items, activeShipment, shipments]);
+  const updateShipmentGrCode = (grCode: string) => {
+    setShipments((prev) =>
+      prev.map((s) => (s.id === activeShipmentId ? { ...s, grCode } : s)),
+    );
+  };
 
   const subtotal = items.reduce((sum, it) => sum + it.qty * it.price, 0);
-  const discountAmount =
+  // Diskon dibulatkan ke rupiah utuh & gak boleh lebih dari subtotal, biar
+  // angka yang tampil di invoice selalu cocok kalau dijumlah.
+  const rawDiscount =
     discountType === "percent"
       ? (subtotal * discountValue) / 100
       : discountValue;
+  const discountAmount = Math.min(
+    Math.round(Math.max(rawDiscount, 0)),
+    subtotal,
+  );
   // PPN dihitung dari subtotal setelah diskon; ongkir tidak dikenai PPN.
   const taxableBase = Math.max(subtotal - discountAmount, 0);
   const taxAmount = taxEnabled ? Math.round((taxableBase * taxRate) / 100) : 0;
   const grandTotal = taxableBase + taxAmount + shippingCost;
+  const needsMaterai = grandTotal >= MATERAI_THRESHOLD;
+  const showMateraiNotice = docType === "invoice" && needsMaterai;
+  const showPpnNotice = docType === "invoice" && taxEnabled && taxAmount > 0;
 
-  const suratJalanBase = invoiceNumber.replace(/^INV-/, "SJ-");
-  const suratJalanNumber = activeShipment
-    ? `${suratJalanBase}-${activeShipment.seq}`
-    : suratJalanBase;
+  const suratJalanNumber = buildSuratJalanNumber(
+    invoiceNumber,
+    activeShipment?.seq,
+  );
   const documentDate =
     docType === "suratJalan"
       ? (activeShipment?.date ?? invoiceDate)
@@ -1383,13 +1966,17 @@ export default function InvoiceGenerator() {
 
   const topLabel =
     topDays === null
-      ? customTopDays !== "" && !isNaN(customTopDays)
-        ? `Custom (${customTopDays} Hari)`
-        : "Custom"
-      : (TOP_OPTIONS.find((t) => t.days === topDays)?.label ?? "Custom");
+      ? // Custom: yang tampil di dokumen cukup jumlah harinya, tanpa kata
+        // "Custom". Kalau angkanya belum diisi, tampil strip.
+        customTopDays !== "" && !isNaN(customTopDays)
+        ? `${customTopDays} Hari`
+        : "-"
+      : (TOP_OPTIONS.find((t) => t.days === topDays)?.label ??
+        `${topDays} Hari`);
 
+  // Auto-fit canvas desktop.
   useEffect(() => {
-    if (!autoFit) return;
+    if (!showDesktop || !autoFit) return;
     const recompute = () => {
       const wrap = canvasWrapRef.current;
       const page = pageRef.current;
@@ -1412,7 +1999,25 @@ export default function InvoiceGenerator() {
       ro.disconnect();
       window.removeEventListener("resize", recompute);
     };
-  }, [autoFit, items.length, docType, panelCollapsed]);
+  }, [showDesktop, autoFit, items.length, docType, panelCollapsed]);
+
+  // Layar utama HP: dokumen selalu pas selebar layar.
+  useEffect(() => {
+    if (!showMobile) return;
+    const recompute = () => {
+      const wrap = mobileWrapRef.current;
+      if (!wrap) return;
+      setMobileZoom(Math.min((wrap.clientWidth - 24) / 780, 1));
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (mobileWrapRef.current) ro.observe(mobileWrapRef.current);
+    window.addEventListener("resize", recompute);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", recompute);
+    };
+  }, [showMobile]);
 
   useEffect(() => {
     if (!showFullPreview || !previewAutoFit) return;
@@ -1441,6 +2046,164 @@ export default function InvoiceGenerator() {
     };
   }, [showFullPreview, previewAutoFit, items.length, docType]);
 
+  // Tombol Esc menutup preview.
+  useEffect(() => {
+    if (!showFullPreview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowFullPreview(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showFullPreview]);
+
+  // ── Preview: pinch-zoom 2 jari + double-tap (HP) ────────────────────
+  // Zoom mengikuti titik tengah jari (anchorRef dipakai useLayoutEffect di
+  // bawah untuk menggeser scroll). Double-tap: pindah antara "Fit" dan 100%.
+  const previewZoomRef = useRef(1);
+  previewZoomRef.current = previewZoom;
+  const previewAutoFitRef = useRef(true);
+  previewAutoFitRef.current = previewAutoFit;
+  const pinchRef = useRef<{
+    dist: number;
+    zoom: number;
+    docX: number;
+    docY: number;
+    cx: number;
+    cy: number;
+  } | null>(null);
+  const anchorRef = useRef<{
+    docX: number;
+    docY: number;
+    cx: number;
+    cy: number;
+  } | null>(null);
+  const lastTapRef = useRef<{ t: number; x: number; y: number } | null>(null);
+  const tapStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!showFullPreview) return;
+    const wrap = previewWrapRef.current;
+    if (!wrap) return;
+    const dist = (t: TouchList) =>
+      Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        const page = previewPageRef.current;
+        if (!page) return;
+        const rect = page.getBoundingClientRect();
+        const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const z = previewZoomRef.current;
+        pinchRef.current = {
+          dist: dist(e.touches),
+          zoom: z,
+          docX: (cx - rect.left) / z,
+          docY: (cy - rect.top) / z,
+          cx,
+          cy,
+        };
+        tapStartRef.current = null;
+      } else if (e.touches.length === 1) {
+        tapStartRef.current = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY,
+        };
+      }
+    };
+
+    const onMove = (e: TouchEvent) => {
+      const p = pinchRef.current;
+      if (p && e.touches.length === 2) {
+        const next = Math.min(
+          Math.max((p.zoom * dist(e.touches)) / p.dist, 0.3),
+          3,
+        );
+        anchorRef.current = {
+          docX: p.docX,
+          docY: p.docY,
+          cx: p.cx,
+          cy: p.cy,
+        };
+        setPreviewAutoFit(false);
+        setPreviewZoom(next);
+      } else if (tapStartRef.current && e.touches.length === 1) {
+        const t = e.touches[0];
+        if (
+          Math.hypot(
+            t.clientX - tapStartRef.current.x,
+            t.clientY - tapStartRef.current.y,
+          ) > 10
+        ) {
+          tapStartRef.current = null;
+        }
+      }
+    };
+
+    const onEnd = (e: TouchEvent) => {
+      if (pinchRef.current) {
+        if (e.touches.length < 2) {
+          pinchRef.current = null;
+          anchorRef.current = null;
+        }
+        return;
+      }
+      const s = tapStartRef.current;
+      tapStartRef.current = null;
+      if (!s || e.touches.length > 0) return;
+      const now = Date.now();
+      const last = lastTapRef.current;
+      if (
+        last &&
+        now - last.t < 300 &&
+        Math.hypot(s.x - last.x, s.y - last.y) < 30
+      ) {
+        lastTapRef.current = null;
+        if (previewAutoFitRef.current) {
+          setPreviewAutoFit(false);
+          setPreviewZoom(1);
+        } else {
+          setPreviewAutoFit(true);
+        }
+      } else {
+        lastTapRef.current = { t: now, x: s.x, y: s.y };
+      }
+    };
+
+    wrap.addEventListener("touchstart", onStart, { passive: true });
+    wrap.addEventListener("touchmove", onMove, { passive: true });
+    wrap.addEventListener("touchend", onEnd, { passive: true });
+    wrap.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      wrap.removeEventListener("touchstart", onStart);
+      wrap.removeEventListener("touchmove", onMove);
+      wrap.removeEventListener("touchend", onEnd);
+      wrap.removeEventListener("touchcancel", onEnd);
+    };
+  }, [showFullPreview]);
+
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    const wrap = previewWrapRef.current;
+    const page = previewPageRef.current;
+    if (!a || !wrap || !page) return;
+    const rect = page.getBoundingClientRect();
+    wrap.scrollLeft += rect.left - (a.cx - a.docX * previewZoom);
+    wrap.scrollTop += rect.top - (a.cy - a.docY * previewZoom);
+  }, [previewZoom]);
+
+  // Buka preview. Di HP mulai dari zoom yang terbaca (bukan fit-lebar yang
+  // bikin teks mini); di desktop/tablet tetap fit ke layar.
+  const openPreview = () => {
+    if (typeof window !== "undefined" && window.innerWidth < 768) {
+      setPreviewAutoFit(false);
+      setPreviewZoom(READABLE_ZOOM);
+    } else {
+      setPreviewAutoFit(true);
+    }
+    setShowFullPreview(true);
+  };
+
   const handleCustomerNameChange = (name: string) => {
     setCustomerName(name);
     if (!invoiceNumberTouched) setInvoiceNumber(autoInvoiceNumber(name));
@@ -1451,8 +2214,9 @@ export default function InvoiceGenerator() {
     if (days !== null) setDueDate(addDaysISO(invoiceDate, days));
   };
 
+  // Hari custom tidak boleh negatif / pecahan.
   const handleCustomTopDaysChange = (v: string) => {
-    const n = v === "" ? "" : Number(v);
+    const n = v === "" ? "" : Math.max(0, Math.floor(Number(v)));
     setCustomTopDays(n);
     if (n !== "" && !isNaN(n)) setDueDate(addDaysISO(invoiceDate, n));
   };
@@ -1464,6 +2228,24 @@ export default function InvoiceGenerator() {
       setDueDate(addDaysISO(date, customTopDays));
   };
 
+  // Jatuh tempo diubah manual -> hitung selisih hari dari tanggal invoice.
+  // Kalau cocok dengan preset TOP, pilih preset itu; kalau tidak, pindah ke
+  // Custom dengan jumlah hari terisi. Jadi label Termin selalu cocok dengan
+  // tanggal jatuh tempo.
+  const handleDueDateChange = (date: string) => {
+    if (!date) return;
+    const diff = diffDaysISO(invoiceDate, date);
+    if (diff === null || diff < 0) return;
+    setDueDate(date);
+    const preset = TOP_OPTIONS.find((t) => t.days === diff);
+    if (preset) {
+      setTopDays(diff);
+    } else {
+      setTopDays(null);
+      setCustomTopDays(diff);
+    }
+  };
+
   const addItem = () =>
     setItems((prev) => [
       ...prev,
@@ -1473,9 +2255,13 @@ export default function InvoiceGenerator() {
     setItems((prev) =>
       prev.map((it) => (it.id === id ? { ...it, ...patch } : it)),
     );
+  // Hapus baris. Kalau ini baris terakhir, jangan dibiarkan kosong atau
+  // diabaikan: reset jadi satu baris kosong (sama seperti kondisi awal).
   const removeItem = (id: string) =>
     setItems((prev) =>
-      prev.length > 1 ? prev.filter((it) => it.id !== id) : prev,
+      prev.length > 1
+        ? prev.filter((it) => it.id !== id)
+        : [{ id: uid(), name: "", unit: "pcs", qty: 1, price: 0 }],
     );
 
   const handleSignatureUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1495,26 +2281,105 @@ export default function InvoiceGenerator() {
     }
   };
 
-  // ── Template pesan share — dihitung otomatis sesuai docType. Salam
-  // (pagi/siang/sore/malam) ngikutin jam perangkat saat pesan dibuat. ─────
-  const shareCaption = () => {
-    const salam = greeting();
-    if (docType === "invoice") {
-      const sapaan = `Bapak/Ibu${customerName ? ` ${customerName}` : ""}`;
-      return `${salam}, ${sapaan}.\n\nBerikut kami kirimkan invoice ${invoiceNumber} dari Makmur A3'S.\n\nTotal tagihan: ${currency(grandTotal)}\nTermin: ${topLabel}\nJatuh tempo: ${dueDate}\n\nPembayaran dapat ditransfer ke:\n${bank.bankName} ${bank.accountNumber}\na.n. ${bank.accountHolder}\n\nInvoice terlampir dalam PDF. Mohon dicek, Pak/Bu, terima kasih.`;
+  // Aksi yang menunggu konfirmasi (hapus SJ / keluar).
+  const handleConfirm = () => {
+    const c = confirm;
+    setConfirm(null);
+    if (!c) return;
+    if (c.kind === "logout") handleLogout();
+    else removeShipment(c.id);
+  };
+  const confirmShipment =
+    confirm?.kind === "shipment"
+      ? shipments.find((s) => s.id === confirm.id)
+      : undefined;
+
+  // ── Template pesan share — disusun dari blok sesuai dokumen yang ikut
+  // terkirim (exportDocs). Salam ngikutin jam perangkat saat pesan dibuat.
+  // Sapaan sengaja "Bapak/Ibu" saja (tanpa nama perusahaan). ─────────────
+  const buildSjBlock = (s: Shipment) => {
+    const lines = [
+      `Surat jalan ${buildSuratJalanNumber(invoiceNumber, s.seq)}`,
+      `Tanggal kirim: ${formatDateID(s.date)}`,
+    ];
+    if (s.grCode.trim()) lines.push(`Kode GR: ${s.grCode.trim()}`);
+    if (!s.shipTo.sameAsCustomer) {
+      const dest = [s.shipTo.name, s.shipTo.address]
+        .map((v) => v.trim().replace(/\s*\n\s*/g, ", "))
+        .filter(Boolean)
+        .join(", ");
+      if (dest) lines.push(`Dikirim ke: ${dest}`);
     }
-    const targetName = shippingAddress.sameAsCustomer
-      ? customerName
-      : shippingAddress.name;
-    const sapaan = `Bapak/Ibu${targetName ? ` ${targetName}` : ""}`;
-    return `${salam}, ${sapaan}.\n\nBerikut kami kirimkan surat jalan ${suratJalanNumber} (ref. invoice ${invoiceNumber}) untuk pengiriman tanggal ${activeShipment?.date ?? documentDate}.\n\nSurat jalan terlampir dalam PDF. Mohon dicek saat barang diterima, Pak/Bu, terima kasih.`;
+    return lines.join("\n");
   };
 
-  // Nomor tujuan WhatsApp: surat jalan ke alamat lain -> HP penerima,
-  // selain itu -> HP customer.
+  const shareCaption = () => {
+    const head = `${greeting()}, Bapak/Ibu.`;
+    const hasInvoice = exportDocs.some((d) => d.kind === "invoice");
+    const sjList = exportDocs
+      .filter((d) => d.kind === "suratJalan" && d.shipment)
+      .map((d) => d.shipment as Shipment);
+
+    const invoiceBlock = [
+      `Tanggal invoice: ${formatDateID(invoiceDate)}`,
+      ...(poNumber.trim() ? [`No. PO: ${poNumber.trim()}`] : []),
+      `Total tagihan: ${currency(grandTotal)}`,
+      `Termin: ${topLabel}`,
+      `Jatuh tempo: ${formatDateID(dueDate)}`,
+    ].join("\n");
+
+    const bankBlock = `Pembayaran dapat ditransfer ke:\n${bank.bankName} ${bank.accountNumber}\na.n. ${bank.accountHolder}`;
+
+    // Invoice saja (perilaku lama).
+    if (hasInvoice && sjList.length === 0) {
+      return [
+        head,
+        `Berikut kami kirimkan invoice ${invoiceNumber} dari Makmur A3'S.`,
+        invoiceBlock,
+        bankBlock,
+        "Invoice terlampir dalam PDF. Mohon dicek, Pak/Bu, terima kasih.",
+      ].join("\n\n");
+    }
+
+    // Surat jalan saja (perilaku lama).
+    if (!hasInvoice) {
+      const s = sjList[0] ?? activeShipment;
+      const sjNo = buildSuratJalanNumber(invoiceNumber, s?.seq);
+      const grLine = s?.grCode.trim() ? `Kode GR: ${s.grCode.trim()}` : "";
+      return [
+        head,
+        `Berikut kami kirimkan surat jalan ${sjNo} (ref. invoice ${invoiceNumber}) untuk pengiriman tanggal ${formatDateID(s?.date ?? documentDate)}.`,
+        ...(grLine ? [grLine] : []),
+        "Surat jalan terlampir dalam PDF. Mohon dicek saat barang diterima, Pak/Bu, terima kasih.",
+      ].join("\n\n");
+    }
+
+    // Gabungan: invoice + satu atau lebih surat jalan.
+    const sjNumbers = sjList.map((s) =>
+      buildSuratJalanNumber(invoiceNumber, s.seq),
+    );
+    const attachLine =
+      fileCount > 1
+        ? `Seluruh dokumen terlampir dalam ${fileCount} file PDF.`
+        : "Seluruh dokumen terlampir dalam 1 file PDF.";
+    return [
+      head,
+      `Berikut kami kirimkan invoice ${invoiceNumber} beserta surat jalan ${sjNumbers.join(", ")} dari Makmur A3'S.`,
+      invoiceBlock,
+      ...sjList.map(buildSjBlock),
+      bankBlock,
+      `${attachLine} Mohon dicek, Pak/Bu, terima kasih.`,
+    ].join("\n\n");
+  };
+
+  // Nomor tujuan WhatsApp: kalau bundling nyala -> HP customer. Kalau mati,
+  // perilaku lama: surat jalan ke alamat lain -> HP penerima, selain itu HP
+  // customer.
   const shareTargetPhone = () =>
-    docType === "suratJalan" && !shippingAddress.sameAsCustomer
-      ? shippingAddress.phone
+    exportDocs.length <= 1 &&
+    docType === "suratJalan" &&
+    !activeShipTo.sameAsCustomer
+      ? activeShipTo.phone
       : customer.phone;
 
   // Salin template pesan ke clipboard (cadangan kalau WhatsApp membuang
@@ -1527,32 +2392,41 @@ export default function InvoiceGenerator() {
     }
   };
 
-  const emailSubjectText = () =>
-    docType === "invoice"
+  const emailSubjectText = () => {
+    const hasInvoice = exportDocs.some((d) => d.kind === "invoice");
+    const hasSj = exportDocs.some((d) => d.kind === "suratJalan");
+    if (hasInvoice && hasSj)
+      return `Invoice ${invoiceNumber} + Surat Jalan — Makmur A3'S`;
+    return docType === "invoice"
       ? `Invoice ${invoiceNumber} — Makmur A3'S`
       : `Surat Jalan ${suratJalanNumber} — Makmur A3'S`;
+  };
 
+  // Print: area export dirender lewat portal langsung di <body>, dan CSS
+  // print menyembunyikan semua anak body lain. Jadi 1 dokumen maupun
+  // bundling sama-sama satu print job (satu PDF, halaman terpisah).
   const handlePrint = () => window.print();
 
-  const getPdfFileName = () =>
-    `${docType === "invoice" ? invoiceNumber : suratJalanNumber}.pdf`;
-
-  const buildPdfDocument = async () => {
-    if (!exportRef.current) return null;
+  // Tambahkan satu elemen dokumen ke PDF A4 (halaman baru kalau bukan yang
+  // pertama). Paginasi untuk dokumen panjang sama seperti sebelumnya.
+  const addElementToPdf = async (
+    pdf: import("jspdf").jsPDF,
+    el: HTMLElement,
+    isFirst: boolean,
+  ) => {
     const html2canvas = (await import("html2canvas")).default;
-    const { jsPDF } = await import("jspdf");
-    await waitForImages(exportRef.current);
-    const canvas = await html2canvas(exportRef.current, {
+    await waitForImages(el);
+    const canvas = await html2canvas(el, {
       scale: 2,
       useCORS: true,
       backgroundColor: "#ffffff",
     });
     const imgData = canvas.toDataURL("image/png");
-    const pdf = new jsPDF("p", "mm", "a4");
     const pageWidth = 210;
     const pageHeight = 297;
     const imgHeight = (canvas.height * pageWidth) / canvas.width;
 
+    if (!isFirst) pdf.addPage();
     let heightLeft = imgHeight;
     let position = 0;
     pdf.addImage(imgData, "PNG", 0, position, pageWidth, imgHeight);
@@ -1563,14 +2437,51 @@ export default function InvoiceGenerator() {
       pdf.addImage(imgData, "PNG", 0, position, pageWidth, imgHeight);
       heightLeft -= pageHeight;
     }
-    return pdf;
   };
 
-  const getPdfFile = async (): Promise<File | null> => {
-    const pdf = await buildPdfDocument();
-    if (!pdf) return null;
-    const blob = pdf.output("blob") as Blob;
-    return new File([blob], getPdfFileName(), { type: "application/pdf" });
+  // Semua dokumen di exportDocs -> daftar PDF. Kalau mergeActive: satu PDF
+  // gabungan. Kalau tidak: satu PDF per dokumen. Diproses berurutan supaya
+  // memori html2canvas tidak numpuk.
+  const buildPdfDocuments = async (): Promise<BuiltPdf[]> => {
+    const root = exportRef.current;
+    if (!root) return [];
+    await nextFrames();
+    const { jsPDF } = await import("jspdf");
+
+    const targets = exportDocs
+      .map((d) => ({
+        d,
+        el: root.querySelector<HTMLElement>(`[data-export-key="${d.key}"]`),
+      }))
+      .filter((t): t is { d: ExportDoc; el: HTMLElement } => !!t.el);
+
+    if (targets.length === 0) return [];
+
+    if (mergeActive) {
+      const pdf = new jsPDF("p", "mm", "a4");
+      for (let i = 0; i < targets.length; i++) {
+        await addElementToPdf(pdf, targets[i].el, i === 0);
+      }
+      return [{ fileName: `${invoiceNumber}-SJ.pdf`, pdf }];
+    }
+
+    const built: BuiltPdf[] = [];
+    for (const { d, el } of targets) {
+      const pdf = new jsPDF("p", "mm", "a4");
+      await addElementToPdf(pdf, el, true);
+      built.push({ fileName: d.fileName, pdf });
+    }
+    return built;
+  };
+
+  const getPdfFiles = async (): Promise<File[]> => {
+    const built = await buildPdfDocuments();
+    return built.map(
+      ({ fileName, pdf }) =>
+        new File([pdf.output("blob") as Blob], fileName, {
+          type: "application/pdf",
+        }),
+    );
   };
 
   const downloadFile = (file: File) => {
@@ -1579,39 +2490,45 @@ export default function InvoiceGenerator() {
     a.href = url;
     a.download = file.name;
     a.click();
-    URL.revokeObjectURL(url);
+    // Jangan di-revoke langsung — di sebagian browser mobile download
+    // bisa gagal kalau URL-nya keburu dicabut.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
 
   const handleDownloadPdf = async () => {
     setBusy("pdf");
     try {
-      const pdf = await buildPdfDocument();
-      pdf?.save(getPdfFileName());
+      const built = await buildPdfDocuments();
+      for (let i = 0; i < built.length; i++) {
+        built[i].pdf.save(built[i].fileName);
+        // Jeda antar download supaya browser tidak menelan file berikutnya.
+        if (i < built.length - 1) await wait(400);
+      }
     } finally {
       setBusy(null);
     }
   };
 
-  // Share: Web Share API (HP) kirim PDF + teks. Template juga disalin ke
-  // clipboard dulu, karena WhatsApp sering membuang teks saat ada file.
+  // Share: Web Share API (HP) kirim semua PDF + teks. Template juga disalin
+  // ke clipboard dulu, karena WhatsApp sering membuang teks saat ada file.
   // Kalau Web Share gak didukung (desktop), buka dropdown WhatsApp/Email.
   const handleShareClick = async () => {
     setBusy("share");
     setShareNotice(null);
     copyCaption(); // sebelum await, supaya masih dianggap klik user
     try {
-      const file = await getPdfFile();
+      const files = await getPdfFiles();
       const caption = shareCaption();
       if (
-        file &&
+        files.length > 0 &&
         typeof navigator !== "undefined" &&
-        (navigator as any).canShare?.({ files: [file] })
+        (navigator as any).canShare?.({ files })
       ) {
         try {
           await (navigator as any).share({
-            files: [file],
+            files,
             text: caption,
-            title: getPdfFileName(),
+            title: files.length === 1 ? files[0].name : invoiceNumber,
           });
           return;
         } catch (err: any) {
@@ -1629,8 +2546,11 @@ export default function InvoiceGenerator() {
     setBusy("share");
     copyCaption();
     try {
-      const file = await getPdfFile();
-      if (file) downloadFile(file);
+      const files = await getPdfFiles();
+      for (let i = 0; i < files.length; i++) {
+        downloadFile(files[i]);
+        if (i < files.length - 1) await wait(400);
+      }
       if (channel === "wa") {
         window.open(
           `https://wa.me/${toWaNumber(shareTargetPhone())}?text=${encodeURIComponent(shareCaption())}`,
@@ -1641,7 +2561,7 @@ export default function InvoiceGenerator() {
           emailSubjectText(),
         )}&body=${encodeURIComponent(shareCaption())}`;
       }
-      setShareNotice({ channel });
+      setShareNotice({ channel, count: files.length });
     } finally {
       setBusy(null);
     }
@@ -1650,67 +2570,1232 @@ export default function InvoiceGenerator() {
   const getShareNoticeText = () => {
     if (!shareNotice) return null;
     const target = shareNotice.channel === "wa" ? "WhatsApp" : "aplikasi email";
+    const multi = shareNotice.count > 1;
+    const pdfs = multi ? `${shareNotice.count} PDF` : "PDF";
+    const attach = multi ? "semua PDF-nya" : "PDF-nya";
     return isMobile
-      ? `PDF sudah otomatis kedownload, dan ${target} sudah kebuka dengan teks siap kirim. Lampirkan PDF-nya dari folder Download. Teks pesan juga sudah disalin, tinggal paste kalau belum muncul.`
-      : `PDF sudah otomatis kedownload ke komputer, dan ${target} kebuka di tab/aplikasi baru dengan teks siap kirim. Lampirkan PDF yang barusan kedownload. Teks pesan juga sudah disalin ke clipboard.`;
+      ? `${pdfs} sudah otomatis kedownload, dan ${target} sudah kebuka dengan teks siap kirim. Lampirkan ${attach} dari folder Download. Teks pesan juga sudah disalin, tinggal paste kalau belum muncul.`
+      : `${pdfs} sudah otomatis kedownload ke komputer, dan ${target} kebuka di tab/aplikasi baru dengan teks siap kirim. Lampirkan ${multi ? "semua PDF yang" : "PDF yang"} barusan kedownload. Teks pesan juga sudah disalin ke clipboard.`;
   };
 
-  const docProps = {
-    docType,
-    company,
-    setCompany,
-    customerName,
-    onCustomerNameChange: handleCustomerNameChange,
-    customer,
-    setCustomer,
-    invoiceNumber,
-    onInvoiceNumberChange: (v: string) => {
-      setInvoiceNumber(v);
-      setInvoiceNumberTouched(true);
-    },
-    suratJalanNumber,
-    documentDate,
-    dueDate,
-    topLabel,
-    items,
-    updateItem,
-    removeItem,
-    addItem,
-    subtotal,
-    discountAmount,
-    shippingCost,
-    grandTotal,
-    bank,
-    signatureUrl,
-    signerName,
-    signerTitle,
-    showStamp,
-    taxRate,
-    taxAmount,
-    shippingAddress,
-    setShippingAddress,
-    sjRows,
-    updateSjItem: updateShipmentItem,
+  // Props dokumen untuk satu jenis dokumen + satu shipment. Default shipment =
+  // SJ aktif, jadi canvas dan preview tidak berubah. Area export memanggilnya
+  // lagi untuk SJ lain (bundling).
+  const buildDocProps = (
+    type: DocType,
+    shipment: Shipment | undefined = activeShipment,
+  ) => {
+    const isSJ = type === "suratJalan";
+    return {
+      docType: type,
+      company,
+      setCompany,
+      customerName,
+      onCustomerNameChange: handleCustomerNameChange,
+      customer,
+      setCustomer,
+      invoiceNumber,
+      onInvoiceNumberChange: (v: string) => {
+        setInvoiceNumber(v);
+        setInvoiceNumberTouched(true);
+      },
+      suratJalanNumber: buildSuratJalanNumber(invoiceNumber, shipment?.seq),
+      documentDate: formatDateID(
+        isSJ ? (shipment?.date ?? invoiceDate) : invoiceDate,
+      ),
+      dueDate: formatDateID(dueDate),
+      topLabel,
+      poNumber: poNumber.trim(),
+      grCode: (shipment?.grCode ?? "").trim(),
+      items,
+      updateItem,
+      removeItem,
+      addItem,
+      subtotal,
+      discountAmount,
+      shippingCost,
+      grandTotal,
+      bank,
+      signatureUrl,
+      signerName,
+      signerTitle,
+      showStamp,
+      showLogo,
+      showMateraiBox,
+      showSjStamp,
+      taxRate,
+      taxAmount,
+      shippingAddress: shipment?.shipTo ?? DEFAULT_SHIP_TO,
+      updateShipTo,
+      sjRows: isSJ ? computeSjRows(items, shipments, shipment) : [],
+      updateSjItem: updateShipmentItem,
+    };
   };
+
+  const docProps = buildDocProps(docType);
+
+  // Dokumen yang akan di-export (PDF/print/share). Urutannya selalu: invoice
+  // dulu, baru surat jalan. Bundling mati -> hanya dokumen tab aktif, sama
+  // persis dengan perilaku lama.
+  const makeInvoiceDoc = (): ExportDoc => ({
+    key: "invoice",
+    kind: "invoice",
+    fileName: `${invoiceNumber}.pdf`,
+    props: buildDocProps("invoice"),
+  });
+
+  const makeSjDoc = (s: Shipment): ExportDoc => ({
+    key: `sj-${s.id}`,
+    kind: "suratJalan",
+    fileName: `${buildSuratJalanNumber(invoiceNumber, s.seq)}.pdf`,
+    shipment: s,
+    props: buildDocProps("suratJalan", s),
+  });
+
+  const exportDocs: ExportDoc[] = (() => {
+    if (!bundleOn) {
+      if (docType === "invoice") return [makeInvoiceDoc()];
+      return activeShipment ? [makeSjDoc(activeShipment)] : [];
+    }
+    if (docType === "invoice") {
+      const picked = [...shipments]
+        .filter(shipmentHasItems)
+        .sort((a, b) => a.seq - b.seq);
+      return [makeInvoiceDoc(), ...picked.map(makeSjDoc)];
+    }
+    // Tab Surat Jalan + "Sertakan Invoice". Kalau SJ-nya kosong, balik ke
+    // perilaku lama (SJ saja) supaya tidak tiba-tiba mengekspor invoice.
+    if (activeShipment && shipmentHasItems(activeShipment)) {
+      return [makeInvoiceDoc(), makeSjDoc(activeShipment)];
+    }
+    return activeShipment ? [makeSjDoc(activeShipment)] : [];
+  })();
+
+  // Jumlah dokumen vs jumlah file hasil export (1 kalau digabung).
+  const docCount = exportDocs.length;
+  const mergeActive = mergePdf && docCount > 1;
+  const fileCount = mergeActive ? 1 : docCount;
+
+  // Label tombol dinamis — polos kalau cuma 1 file/dokumen.
+  // Digabung -> 1 file berisi N halaman ("pages"); tidak digabung -> N file.
+  const countSuffix = mergeActive
+    ? ` (${docCount} pages)`
+    : fileCount > 1
+      ? ` (${fileCount} files)`
+      : "";
+  const shareLabel = `Share${countSuffix}`;
+  const pdfLabel = `PDF${countSuffix}`;
+  const printLabel = docCount > 1 ? `Print (${docCount} pages)` : "Print";
+
+  // Daftar alamat dari SJ lain yang bisa disalin (tanpa duplikat). Muncul
+  // sebagai dropdown "Salin dari SJ lain" di tab Kirim Ke.
+  const shipToSources = (() => {
+    const seen = new Set<string>();
+    const out: { key: string; label: string; shipTo: ShipTo }[] = [];
+    [...shipments]
+      .sort((a, b) => a.seq - b.seq)
+      .forEach((sh) => {
+        if (sh.id === activeShipment?.id) return;
+        const t = sh.shipTo;
+        if (t.sameAsCustomer) return;
+        const name = t.name.trim();
+        const addr = t.address.trim();
+        if (!name && !addr) return;
+        const k = `${name.toLowerCase()}|${addr.toLowerCase()}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push({
+          key: sh.id,
+          label: `SJ #${sh.seq} — ${name || addr.split("\n")[0]}`,
+          shipTo: t,
+        });
+      });
+    return out;
+  })();
+
+  // Pemilih SJ (pilih / hapus / tambah). Dipakai di tab "Kirim Ke", "Surat
+  // Jalan", dan "Barang". Tombol hapus terpisah dari tombol pilih (target
+  // sentuh sendiri) dan selalu minta konfirmasi.
+  const shipmentChips = (
+    <div className="flex items-center gap-1.5 flex-wrap mt-1">
+      {shipments.map((s) => {
+        const active = s.id === activeShipment?.id;
+        return (
+          <div
+            key={s.id}
+            className={`flex items-center rounded-full border transition-colors ${
+              active
+                ? "bg-ink text-white border-ink"
+                : "border-line text-ink/60 hover:border-ink"
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => setActiveShipmentId(s.id)}
+              className={`min-h-10 lg:min-h-0 lg:py-1 pl-3.5 text-xs font-medium ${
+                shipments.length > 1 ? "pr-1.5" : "pr-3.5"
+              }`}
+            >
+              SJ #{s.seq}
+            </button>
+            {shipments.length > 1 && (
+              <button
+                type="button"
+                aria-label={`Hapus SJ #${s.seq}`}
+                onClick={() => setConfirm({ kind: "shipment", id: s.id })}
+                className="w-10 h-10 lg:w-7 lg:h-7 flex items-center justify-center rounded-full opacity-60 hover:opacity-100"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      })}
+      <button
+        type="button"
+        onClick={addShipment}
+        className="flex items-center gap-1 min-h-10 lg:min-h-0 px-3 lg:px-2.5 lg:py-1 rounded-full text-xs font-medium border border-dashed border-line text-ink/50 hover:border-ink hover:text-ink"
+      >
+        <Plus className="w-3 h-3" /> SJ Baru
+      </button>
+    </div>
+  );
+
+  // UI bundling di atas tombol Share/PDF/Print: satu centang per tab.
+  // Tab Invoice -> semua SJ yang ada barangnya. Tab SJ -> invoice.
+  const sjWithItems = shipments.filter(shipmentHasItems).length;
+  let bundleUi: React.ReactNode;
+  if (docType === "invoice") {
+    const has = sjWithItems > 0;
+    bundleUi = (
+      <BundleCheck
+        checked={bundleOn && has}
+        disabled={!has}
+        label={
+          has ? `Sertakan Surat Jalan (${sjWithItems})` : "Sertakan Surat Jalan"
+        }
+        note={has ? undefined : "Belum ada surat jalan yang berisi barang."}
+        onChange={(v) => setBundleOn(v)}
+      />
+    );
+  } else {
+    const has = shipmentHasItems(activeShipment);
+    bundleUi = (
+      <BundleCheck
+        checked={bundleOn && has}
+        disabled={!has}
+        label="Sertakan Invoice"
+        note={has ? undefined : "SJ ini belum ada barang yang dikirim."}
+        onChange={(v) => setBundleOn(v)}
+      />
+    );
+  }
+
+  // Pengingat materai / Faktur Pajak. Ketuk untuk loncat ke bagian terkait
+  // (desktop: tab sidebar, HP: sheet edit).
+  const jumpToTab = (tab: string) => {
+    setShareSheetOpen(false);
+    if (showMobile) {
+      openSheet(tab);
+    } else {
+      setPanelCollapsed(false);
+      setActiveSidebarTab(tab);
+    }
+  };
+  const noticeChips =
+    docType === "invoice" && (showMateraiNotice || showPpnNotice) ? (
+      <div className="flex flex-wrap gap-1.5">
+        {showMateraiNotice && (
+          <button
+            type="button"
+            onClick={() => jumpToTab("ttd")}
+            className="flex items-center gap-1 min-h-10 lg:min-h-0 rounded-full border border-amber-200 bg-amber-50 px-3 lg:px-2.5 lg:py-1.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+          >
+            <AlertTriangle className="w-3 h-3 shrink-0" />
+            Kemungkinan perlu materai
+          </button>
+        )}
+        {showPpnNotice && (
+          <button
+            type="button"
+            onClick={() => jumpToTab("diskon")}
+            className="flex items-center gap-1 min-h-10 lg:min-h-0 rounded-full border border-sky-200 bg-sky-50 px-3 lg:px-2.5 lg:py-1.5 text-[11px] font-medium text-sky-900 hover:bg-sky-100"
+          >
+            <Info className="w-3 h-3 shrink-0" />
+            Siapkan Faktur Pajak
+          </button>
+        )}
+      </div>
+    ) : null;
+
+  const shareNoticeBox = shareNotice ? (
+    <div className="flex items-start gap-2 bg-sand/60 border border-line rounded-lg px-3 py-2 text-[11px] text-ink/70 leading-relaxed max-h-24 overflow-y-auto">
+      <span className="flex-1">{getShareNoticeText()}</span>
+      <button
+        type="button"
+        onClick={() => setShareNotice(null)}
+        aria-label="Tutup"
+        className="text-ink/40 hover:text-ink shrink-0"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  ) : null;
+
+  // Bar aksi di sidebar (DESKTOP): pilihan dokumen + PDF / Print / Share.
+  const renderActionBar = () => (
+    <div className="no-print shrink-0 border-t border-line p-3 bg-white flex flex-col gap-2">
+      {shareNoticeBox}
+      {noticeChips}
+
+      {/* Pilihan dokumen: selalu kelihatan, satu centang + opsi gabung. */}
+      <div className="border border-line rounded-lg px-3 py-2 flex flex-col gap-1.5">
+        {bundleUi}
+        {docCount > 1 && (
+          <BundleCheck
+            checked={mergePdf}
+            disabled={false}
+            label="Gabungkan jadi 1 file PDF"
+            onChange={setMergePdf}
+          />
+        )}
+      </div>
+
+      {/* PDF + Print: 2 kolom, label menunjukkan jumlah file/halaman. */}
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={handleDownloadPdf}
+          disabled={busy === "pdf"}
+          className="min-w-0 flex items-center justify-center gap-1.5 rounded-lg border border-line px-2 py-2.5 text-xs font-medium text-ink/80 hover:bg-sand hover:border-ink/30 transition-colors disabled:opacity-60"
+        >
+          <Download className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">
+            {busy === "pdf" ? "Memproses…" : pdfLabel}
+          </span>
+        </button>
+        <button
+          onClick={handlePrint}
+          className="min-w-0 flex items-center justify-center gap-1.5 rounded-lg border border-line px-2 py-2.5 text-xs font-medium text-ink/80 hover:bg-sand hover:border-ink/30 transition-colors"
+        >
+          <Printer className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">{printLabel}</span>
+        </button>
+      </div>
+
+      {/* Share: full width, paling bawah */}
+      <div ref={shareBtnRef} className="relative">
+        <button
+          onClick={handleShareClick}
+          disabled={busy === "share"}
+          className="w-full min-w-0 flex items-center justify-center gap-1.5 rounded-lg bg-ink text-white px-3 py-2.5 text-xs font-medium hover:bg-ink/90 transition-colors disabled:opacity-60"
+        >
+          <Share2 className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">
+            {busy === "share" ? "Memproses…" : shareLabel}
+          </span>
+        </button>
+
+        {shareMenuOpen && (
+          <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-line rounded-lg shadow-lg overflow-hidden z-30">
+            <p className="px-3 pt-2.5 pb-1.5 text-[10px] uppercase tracking-wide text-ink/40 font-semibold">
+              Bagikan lewat
+            </p>
+            <button
+              onClick={() => handleShareFallback("wa")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink/80 hover:bg-sand transition-colors"
+            >
+              <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded-full bg-[#25D366] text-white">
+                <WhatsAppIcon className="w-3 h-3" />
+              </span>
+              WhatsApp
+            </button>
+            <button
+              onClick={() => handleShareFallback("email")}
+              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink/80 hover:bg-sand transition-colors border-t border-line"
+            >
+              <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded-full bg-ink text-white">
+                <Mail className="w-3 h-3" />
+              </span>
+              Email
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // Pengaturan tampilan kop — dipakai di tab Invoice/Surat Jalan (desktop)
+  // dan di sheet ⚙️ (HP).
+  const tampilanUi = (
+    <div className="flex flex-col gap-2">
+      <SidebarSubLabel>Tampilan</SidebarSubLabel>
+      <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+        <span className="text-sm text-ink/80">Tampilkan logo</span>
+        <input
+          type="checkbox"
+          checked={showLogo}
+          onChange={(e) => setShowLogo(e.target.checked)}
+          className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+        />
+      </label>
+      {!showLogo && (
+        <p className="text-[11px] text-ink/40">
+          Logo dimatikan — kop tetap menampilkan nama &quot;Makmur
+          A3&apos;S&quot; dalam bentuk teks.
+        </p>
+      )}
+      {docType === "suratJalan" && (
+        <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+          <span className="text-sm text-ink/80">Cap di kolom Pengirim</span>
+          <input
+            type="checkbox"
+            checked={showSjStamp}
+            onChange={(e) => setShowSjStamp(e.target.checked)}
+            className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+          />
+        </label>
+      )}
+    </div>
+  );
+
+  // ── Isi form per tab. Dipakai di sidebar (desktop) ATAU bottom sheet
+  // (HP) — tidak pernah dua-duanya sekaligus. ───────────────────────────
+  const tabContent = (
+    <>
+      {activeSidebarTab === "customer" && docType === "invoice" && (
+        <>
+          <SidebarSectionHeader icon={User} label="Customer" />
+          <div>
+            <label className="text-xs font-medium text-ink/60">
+              Nama Customer
+            </label>
+            <input
+              placeholder="Nama customer"
+              value={customerName}
+              onChange={(e) => handleCustomerNameChange(e.target.value)}
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+            />
+            <p className="text-[11px] text-ink/40 mt-1">
+              No. Invoice otomatis dibuat dari nama ini.
+            </p>
+          </div>
+          <div>
+            <label className="text-xs font-medium text-ink/60">
+              Alamat (tagihan)
+            </label>
+            <textarea
+              placeholder="Alamat (tagihan)"
+              value={customer.address}
+              onChange={(e) =>
+                setCustomer((c) => ({
+                  ...c,
+                  address: e.target.value,
+                }))
+              }
+              rows={2}
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow resize-none mt-1"
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs font-medium text-ink/60">No. HP</label>
+              <input
+                placeholder="Opsional"
+                value={customer.phone}
+                onChange={(e) =>
+                  setCustomer((c) => ({
+                    ...c,
+                    phone: e.target.value,
+                  }))
+                }
+                className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-ink/60">Email</label>
+              <input
+                placeholder="Opsional"
+                value={customer.email}
+                onChange={(e) =>
+                  setCustomer((c) => ({
+                    ...c,
+                    email: e.target.value,
+                  }))
+                }
+                className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+              />
+            </div>
+          </div>
+          <p className="text-[11px] text-ink/40 -mt-2">
+            No. HP dipakai untuk membuka chat WhatsApp langsung ke customer saat
+            Share.
+          </p>
+        </>
+      )}
+
+      {activeSidebarTab === "customer" && docType === "suratJalan" && (
+        <>
+          <SidebarSectionHeader icon={Truck} label="Tujuan Kirim" />
+
+          <div>
+            <label className="text-xs font-medium text-ink/60">
+              Pengiriman ke-
+            </label>
+            {shipmentChips}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <SidebarSubLabel>
+              {shipments.length > 1
+                ? `Alamat Pengiriman SJ #${activeShipment?.seq}`
+                : "Alamat Pengiriman"}
+            </SidebarSubLabel>
+            <div className="flex items-center gap-1 flex-wrap">
+              <button
+                type="button"
+                onClick={() => updateShipTo({ sameAsCustomer: true })}
+                className={`min-h-10 lg:min-h-0 px-3 lg:px-2.5 lg:py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                  activeShipTo.sameAsCustomer
+                    ? "bg-ink text-white border-ink"
+                    : "border-line text-ink/60 hover:border-ink"
+                }`}
+              >
+                Sama dengan Invoice
+              </button>
+              <button
+                type="button"
+                onClick={() => updateShipTo({ sameAsCustomer: false })}
+                className={`min-h-10 lg:min-h-0 px-3 lg:px-2.5 lg:py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                  !activeShipTo.sameAsCustomer
+                    ? "bg-ink text-white border-ink"
+                    : "border-line text-ink/60 hover:border-ink"
+                }`}
+              >
+                Alamat Lain
+              </button>
+            </div>
+            {shipToSources.length > 0 && (
+              <select
+                value=""
+                onChange={(e) => {
+                  const src = shipToSources.find(
+                    (x) => x.key === e.target.value,
+                  );
+                  if (src)
+                    updateShipTo({
+                      ...src.shipTo,
+                      sameAsCustomer: false,
+                    });
+                }}
+                className="border border-line rounded-lg px-3 py-2 text-sm bg-white text-ink/70 outline-none focus:border-ink"
+              >
+                <option value="">Salin alamat dari SJ lain…</option>
+                {shipToSources.map((x) => (
+                  <option key={x.key} value={x.key}>
+                    {x.label}
+                  </option>
+                ))}
+              </select>
+            )}
+            {!activeShipTo.sameAsCustomer && (
+              <>
+                <input
+                  placeholder="Nama penerima / gudang / outlet"
+                  value={activeShipTo.name}
+                  onChange={(e) => updateShipTo({ name: e.target.value })}
+                  className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                />
+                <textarea
+                  placeholder="Alamat pengiriman (gudang/outlet)"
+                  value={activeShipTo.address}
+                  onChange={(e) => updateShipTo({ address: e.target.value })}
+                  rows={2}
+                  className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow resize-none"
+                />
+                <input
+                  placeholder="No. HP penerima (opsional)"
+                  value={activeShipTo.phone}
+                  onChange={(e) => updateShipTo({ phone: e.target.value })}
+                  className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                />
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {activeSidebarTab === "info" && (
+        <>
+          <SidebarSectionHeader
+            icon={ClipboardList}
+            label={docType === "invoice" ? "Invoice" : "Surat Jalan"}
+          />
+          {docType === "invoice" ? (
+            <>
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-ink/60">
+                  No. Invoice
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInvoiceNumber(autoInvoiceNumber(customerName));
+                    setInvoiceNumberTouched(false);
+                  }}
+                  className="flex items-center gap-1 min-h-10 lg:min-h-0 pl-3 text-[11px] text-ink/40 hover:text-ink"
+                >
+                  <RotateCcw className="w-3 h-3" /> Regenerate
+                </button>
+              </div>
+              <input
+                value={invoiceNumber}
+                onChange={(e) => {
+                  setInvoiceNumber(e.target.value);
+                  setInvoiceNumberTouched(true);
+                }}
+                className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow font-data"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-medium text-ink/60">
+                    Tanggal
+                  </label>
+                  <input
+                    type="date"
+                    value={invoiceDate}
+                    onChange={(e) => handleInvoiceDateChange(e.target.value)}
+                    className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-ink/60">
+                    Jatuh Tempo
+                  </label>
+                  <input
+                    type="date"
+                    value={dueDate}
+                    min={invoiceDate}
+                    onChange={(e) => handleDueDateChange(e.target.value)}
+                    className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  Termin Pembayaran (TOP)
+                </label>
+                <div className="flex items-center gap-1 flex-wrap mt-1">
+                  {TOP_OPTIONS.map((t) => {
+                    const val = t.days === null ? "custom" : String(t.days);
+                    const active =
+                      (topDays === null ? "custom" : String(topDays)) === val;
+                    return (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => handleTopChange(t.days)}
+                        className={`min-h-10 lg:min-h-0 px-3 lg:px-2.5 lg:py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                          active
+                            ? "bg-ink text-white border-ink"
+                            : "border-line text-ink/60 hover:border-ink"
+                        }`}
+                      >
+                        {t.label}
+                      </button>
+                    );
+                  })}
+                  {topDays === null && (
+                    <div className="flex items-center gap-1 pl-2.5 py-1 pr-2.5 rounded-full border border-ink bg-ink/5">
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={customTopDays}
+                        onChange={(e) =>
+                          handleCustomTopDaysChange(e.target.value)
+                        }
+                        placeholder="0"
+                        className="touch-compact w-10 bg-transparent outline-none text-xs font-medium text-right"
+                      />
+                      <span className="text-xs font-medium text-ink/60">
+                        Hari
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  No. PO (opsional)
+                </label>
+                <input
+                  value={poNumber}
+                  onChange={(e) => setPoNumber(e.target.value)}
+                  placeholder="Nomor PO dari customer"
+                  className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  Pengiriman ke-
+                </label>
+                {shipmentChips}
+                <p className="text-[11px] text-ink/40 mt-1.5">
+                  Kalau barang dikirim bertahap, klik &quot;SJ Baru&quot; untuk
+                  tiap pengiriman. Contoh: pesanan 100 pcs dikirim 2 kali. SJ #1
+                  isi 60, lalu SJ #2 otomatis terisi sisanya, 40.
+                </p>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  No. Surat Jalan
+                </label>
+                <div className="border border-line rounded-lg px-3 py-2 text-sm font-data bg-sand/40 text-ink/70 mt-1">
+                  {suratJalanNumber}
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  Tanggal Kirim (batch ini)
+                </label>
+                <input
+                  type="date"
+                  value={activeShipment?.date ?? todayISO()}
+                  onChange={(e) => updateShipmentDate(e.target.value)}
+                  className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  Kode GR (opsional)
+                </label>
+                <input
+                  value={activeShipment?.grCode ?? ""}
+                  onChange={(e) => updateShipmentGrCode(e.target.value)}
+                  placeholder="Good Receipt / kode penerimaan barang"
+                  className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+                />
+                <p className="text-[11px] text-ink/40 mt-1">
+                  Kode penerimaan dari customer. Diisi per pengiriman, jadi tiap
+                  SJ punya kode sendiri. Kalau dikosongkan, di dokumen tetap
+                  tampil garis titik-titik untuk ditulis tangan.
+                </p>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-ink/60">
+                  Referensi Invoice
+                </label>
+                <div className="border border-line rounded-lg px-3 py-2 text-sm font-data bg-sand/40 text-ink/70 mt-1 break-words">
+                  <RefNumber value={invoiceNumber} />
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Tampilan kop dokumen — di desktop ada di sini; di HP pindah ke
+              sheet ⚙️. */}
+          <div className="hidden lg:flex flex-col pt-4 mt-1 border-t border-line">
+            {tampilanUi}
+          </div>
+        </>
+      )}
+
+      {docType === "suratJalan" && activeSidebarTab === "barang" && (
+        <>
+          <SidebarSectionHeader
+            icon={Package}
+            label="Barang Dikirim"
+            hint={
+              shipments.length > 1
+                ? `Untuk SJ #${activeShipment?.seq}`
+                : undefined
+            }
+          />
+          <div>
+            <label className="text-xs font-medium text-ink/60">
+              Pengiriman ke-
+            </label>
+            {shipmentChips}
+          </div>
+
+          {docProps.sjRows.length === 0 ||
+          items.every((it) => !it.name.trim()) ? (
+            <p className="text-[11px] text-ink/40">
+              Belum ada item di invoice. Isi dulu di mode Invoice, bagian Item.
+            </p>
+          ) : null}
+
+          <div className="flex flex-col gap-2">
+            {docProps.sjRows.map((it: any) => (
+              <div
+                key={it.id}
+                className={`border border-line rounded-lg p-2.5 flex flex-col gap-2 ${
+                  !it.included ? "opacity-60" : ""
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium min-w-0 break-words">
+                    {it.name || (
+                      <span className="text-ink/40">(item tanpa nama)</span>
+                    )}
+                  </p>
+                  <label className="shrink-0 flex items-center gap-1.5 text-xs text-ink/70 min-h-11 lg:min-h-0 pl-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+                      checked={it.included}
+                      onChange={(e) =>
+                        updateShipmentItem(it.id, {
+                          included: e.target.checked,
+                        })
+                      }
+                    />
+                    Kirim
+                  </label>
+                </div>
+                <div className="flex items-end gap-2">
+                  <div className="flex-1">
+                    <label className="text-[10px] text-ink/40">
+                      Qty dikirim
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={it.maxAllowed}
+                      value={it.shippedQty}
+                      onChange={(e) =>
+                        updateShipmentItem(it.id, {
+                          qty: Number(e.target.value),
+                        })
+                      }
+                      className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                    />
+                  </div>
+                  <span className="pb-2 text-sm text-ink/60 w-14 shrink-0">
+                    {it.unit}
+                  </span>
+                </div>
+                <p className="text-[11px] text-ink/40">
+                  Pesanan {it.qty} {it.unit}
+                  {it.shippedQty < it.maxAllowed || it.maxAllowed < it.qty
+                    ? ` · maks. ${it.maxAllowed} untuk SJ ini`
+                    : ""}
+                  {it.remainingAfterThis > 0
+                    ? ` · sisa ${it.remainingAfterThis} belum dikirim`
+                    : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {docType === "invoice" && activeSidebarTab === "item" && (
+        <>
+          <SidebarSectionHeader icon={Package} label="Item & Harga" />
+          <button
+            onClick={addItem}
+            className="flex items-center justify-center gap-1.5 border border-dashed border-line rounded-lg min-h-11 lg:min-h-0 py-2 text-sm text-ink/60 hover:border-ink hover:text-ink transition-colors"
+          >
+            <Plus className="w-4 h-4" /> Tambah Baris Kosong
+          </button>
+
+          {/* [MOBILE] daftar saran satuan untuk input Satuan */}
+          <datalist id="unit-options">
+            {UNIT_SUGGESTIONS.map((u) => (
+              <option key={u} value={u} />
+            ))}
+          </datalist>
+
+          {items.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {items.map((it) => (
+                <div
+                  key={it.id}
+                  className="border border-line rounded-lg p-2.5 flex flex-col gap-1.5"
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0 text-xs font-medium">
+                      <ItemNameField
+                        editable
+                        value={it.name}
+                        onChange={(v: string) => updateItem(it.id, { name: v })}
+                      />
+                    </div>
+                    <button
+                      onClick={() => removeItem(it.id)}
+                      aria-label="Hapus baris"
+                      className="shrink-0 w-11 h-11 lg:w-6 lg:h-6 flex items-center justify-center"
+                    >
+                      <Trash2 className="w-4 h-4 lg:w-3.5 lg:h-3.5 text-ink/30 hover:text-brand" />
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <label className="text-[10px] text-ink/40">Qty</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={it.qty}
+                        onChange={(e) =>
+                          updateItem(it.id, {
+                            qty: Number(e.target.value),
+                          })
+                        }
+                        className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                      />
+                    </div>
+                    {/* [MOBILE] Satuan — di desktop sudah ada di canvas */}
+                    <div className="flex-1 lg:hidden">
+                      <label className="text-[10px] text-ink/40">Satuan</label>
+                      <input
+                        list="unit-options"
+                        value={it.unit}
+                        onChange={(e) =>
+                          updateItem(it.id, { unit: e.target.value })
+                        }
+                        placeholder="pcs"
+                        className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="text-[10px] text-ink/40">Harga</label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={it.price ? formatNumber(it.price) : ""}
+                        onChange={(e) =>
+                          updateItem(it.id, {
+                            price: parseNumberInput(e.target.value),
+                          })
+                        }
+                        placeholder="0"
+                        className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                      />
+                    </div>
+                  </div>
+                  {/* [MOBILE] Subtotal per item */}
+                  <p className="text-right text-xs text-ink/50 lg:hidden">
+                    Subtotal{" "}
+                    <span className="font-semibold text-ink">
+                      {currency(it.qty * it.price)}
+                    </span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {docType === "invoice" && activeSidebarTab === "diskon" && (
+        <>
+          <SidebarSectionHeader icon={SlidersHorizontal} label="Tambahan" />
+          <div className="flex flex-col gap-2">
+            <SidebarSubLabel>Diskon</SidebarSubLabel>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                {[
+                  { label: "%", value: "percent" as const },
+                  { label: "Rp", value: "fixed" as const },
+                ].map((o) => (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => setDiscountType(o.value)}
+                    className={`min-h-11 lg:min-h-0 px-3.5 lg:px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
+                      discountType === o.value
+                        ? "bg-ink text-white border-ink"
+                        : "border-line text-ink/60 hover:border-ink"
+                    }`}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="number"
+                min={0}
+                value={discountValue || ""}
+                onChange={(e) => setDiscountValue(Number(e.target.value))}
+                placeholder="0"
+                className="flex-1 min-w-0 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+              />
+            </div>
+            {discountAmount > 0 && (
+              <p className="text-[11px] text-brand">
+                Potongan: -{currency(discountAmount)}
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
+            <SidebarSubLabel>PPN</SidebarSubLabel>
+            <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+              <span className="text-sm text-ink/80">Kenakan PPN</span>
+              <input
+                type="checkbox"
+                checked={taxEnabled}
+                onChange={(e) => setTaxEnabled(e.target.checked)}
+                className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+              />
+            </label>
+            {taxEnabled && (
+              <>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.1"
+                    value={taxRate}
+                    onChange={(e) => setTaxRate(Number(e.target.value))}
+                    className="w-24 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
+                  />
+                  <span className="text-sm text-ink/60">%</span>
+                </div>
+                {taxAmount > 0 && (
+                  <p className="text-[11px] text-ink/40">
+                    PPN: +{currency(taxAmount)}
+                  </p>
+                )}
+              </>
+            )}
+            <p className="text-[11px] text-ink/40">
+              Dihitung dari subtotal setelah diskon. Ongkir tidak dikenai PPN.
+            </p>
+            {showPpnNotice && (
+              <div className="bg-sky-50 border border-sky-200 rounded-lg px-3 py-2 text-[11px] text-sky-900 leading-relaxed">
+                <p className="flex items-center gap-1 font-semibold">
+                  <Info className="w-3 h-3" /> Faktur Pajak
+                </p>
+                <p>
+                  Invoice ini memuat PPN {taxRate}% — jangan lupa terbitkan dan
+                  kirim Faktur Pajak ke customer.
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
+            <SidebarSubLabel>Ongkos Kirim</SidebarSubLabel>
+            <label className="text-xs font-medium text-ink/60">
+              Biaya Ongkir (opsional)
+            </label>
+            <div className="flex items-center gap-1 border border-line rounded-lg px-3 py-2 focus-within:border-ink focus-within:ring-2 focus-within:ring-ink/5 transition-shadow">
+              <span className="text-ink/40 text-xs">Rp</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={shippingCost ? formatNumber(shippingCost) : ""}
+                onChange={(e) =>
+                  setShippingCost(parseNumberInput(e.target.value))
+                }
+                placeholder="0"
+                className="flex-1 min-w-0 bg-transparent text-sm outline-none"
+              />
+            </div>
+            <p className="text-[11px] text-ink/40">
+              Diisi kalau ongkirnya ditagihkan ke customer — otomatis
+              ditambahkan ke Total di invoice. Kosongkan / isi 0 kalau gratis
+              ongkir.
+            </p>
+          </div>
+        </>
+      )}
+
+      {docType === "invoice" && activeSidebarTab === "rekening" && (
+        <>
+          <SidebarSectionHeader icon={Landmark} label="Rekening Bank" />
+          <div>
+            <label className="text-xs font-medium text-ink/60">Nama Bank</label>
+            <input
+              value={bank.bankName}
+              onChange={(e) =>
+                setBank((b) => ({ ...b, bankName: e.target.value }))
+              }
+              placeholder="Nama bank"
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-ink/60">
+              No. Rekening
+            </label>
+            <input
+              value={bank.accountNumber}
+              onChange={(e) =>
+                setBank((b) => ({
+                  ...b,
+                  accountNumber: e.target.value,
+                }))
+              }
+              placeholder="No. rekening"
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-ink/60">Atas Nama</label>
+            <input
+              value={bank.accountHolder}
+              onChange={(e) =>
+                setBank((b) => ({
+                  ...b,
+                  accountHolder: e.target.value,
+                }))
+              }
+              placeholder="Atas nama"
+              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+            />
+          </div>
+        </>
+      )}
+
+      {docType === "invoice" && activeSidebarTab === "ttd" && (
+        <>
+          <SidebarSectionHeader icon={PenTool} label="Tanda Tangan" />
+          {showMateraiNotice && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-900 leading-relaxed">
+              <p className="flex items-center gap-1 font-semibold">
+                <AlertTriangle className="w-3 h-3" /> Perlu materai
+              </p>
+              <p>
+                Total invoice {currency(MATERAI_THRESHOLD)} atau lebih —
+                kemungkinan memerlukan materai.
+              </p>
+              {!showMateraiBox && (
+                <button
+                  type="button"
+                  onClick={() => setShowMateraiBox(true)}
+                  className="mt-1 min-h-10 lg:min-h-0 font-semibold underline underline-offset-2"
+                >
+                  Tambah kotak materai
+                </button>
+              )}
+            </div>
+          )}
+          <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+            <span className="text-sm text-ink/80">Tampilkan cap</span>
+            <input
+              type="checkbox"
+              checked={showStamp}
+              onChange={(e) => setShowStamp(e.target.checked)}
+              className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+            <span className="text-sm text-ink/80">Kotak tempel materai</span>
+            <input
+              type="checkbox"
+              checked={showMateraiBox}
+              onChange={(e) => setShowMateraiBox(e.target.checked)}
+              className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+            />
+          </label>
+          <label className="flex items-center justify-center gap-2 border border-dashed border-line rounded-lg min-h-11 lg:min-h-0 py-2.5 text-sm text-ink/60 hover:border-ink cursor-pointer transition-colors">
+            <Upload className="w-4 h-4" />{" "}
+            {signatureUrl ? "Ganti file" : "Upload tanda tangan"}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleSignatureUpload}
+              className="hidden"
+            />
+          </label>
+          {!signatureUrl && (
+            <p className="text-[11px] text-ink/40">
+              Belum ada tanda tangan diupload — cuma cap yang bakal tampil di
+              invoice.
+            </p>
+          )}
+          {signatureUrl && (
+            <button
+              type="button"
+              onClick={() => setSignatureUrl(null)}
+              className="min-h-10 lg:min-h-0 text-[11px] text-ink/40 hover:text-brand self-start"
+            >
+              Hapus tanda tangan
+            </button>
+          )}
+
+          <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
+            <SidebarSubLabel>Penandatangan</SidebarSubLabel>
+            <div>
+              <label className="text-xs font-medium text-ink/60">
+                Nama (opsional)
+              </label>
+              <input
+                value={signerName}
+                onChange={(e) => setSignerName(e.target.value)}
+                placeholder="Contoh: Budi Santoso"
+                className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-ink/60">
+                Jabatan (opsional)
+              </label>
+              <input
+                value={signerTitle}
+                onChange={(e) => setSignerTitle(e.target.value)}
+                placeholder="Contoh: Direktur"
+                className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
+              />
+            </div>
+            <p className="text-[11px] text-ink/40">
+              Tampil di bawah garis tanda tangan. Kalau nama dikosongkan, yang
+              tampil &quot;Makmur A3&apos;S&quot;.
+            </p>
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  const sheetTitle = `Edit ${sidebarTabs.find((t) => t.id === activeSidebarTab)?.label ?? ""}`;
 
   return (
-    <div className="fixed inset-0 z-[100] bg-neutral-100 flex flex-col overflow-hidden">
+    <div className="print-root fixed inset-0 z-[100] bg-neutral-100 flex flex-col overflow-hidden">
       <style>{`
+        /* Area export disembunyikan di luar layar saat mode normal. */
+        #print-portal { position: fixed; top: 0; left: -10000px; z-index: -1; }
+
         @media print {
           @page { size: A4; margin: 10mm; }
-          body { margin: 0; }
-          body * { visibility: hidden; }
-          #invoice-export-area, #invoice-export-area * { visibility: visible; }
-          #invoice-export-area {
-            position: fixed !important; left: 0 !important; top: 0 !important;
-            width: 100% !important; z-index: 999999 !important;
-          }
-          #invoice-export-area .export-page {
-            width: 100% !important;
-          }
-          #invoice-export-area .overflow-x-auto {
+          html, body {
+            margin: 0;
+            height: auto !important;
             overflow: visible !important;
           }
+
+          /* Sembunyikan semua anak body kecuali portal export. Portal ada
+             langsung di <body>, jadi tidak ada ancestor (fixed / overflow
+             hidden) yang bisa memotong kontennya. */
+          body > *:not(#print-portal) { display: none !important; }
+          #print-portal {
+            display: block !important;
+            position: static !important;
+            left: auto !important;
+            z-index: auto !important;
+          }
+
+          #invoice-export-area .export-page { width: 100% !important; }
+          #invoice-export-area .overflow-x-auto { overflow: visible !important; }
+
+          /* Tiap dokumen (kecuali yang terakhir) diikuti halaman baru. */
+          #invoice-export-area [data-export-doc]:not(:last-child) {
+            break-after: page;
+            page-break-after: always;
+          }
+
+          /* Pertahankan warna (garis brand, cap) saat print. */
+          * {
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+
           .no-print { display: none !important; }
         }
         input[type="number"]::-webkit-inner-spin-button,
@@ -1721,17 +3806,27 @@ export default function InvoiceGenerator() {
         input[type="number"] {
           -moz-appearance: textfield;
         }
+        @keyframes sheet-up {
+          from { transform: translateY(32px); opacity: 0; }
+          to { transform: none; opacity: 1; }
+        }
+        .sheet-up { animation: sheet-up 0.18s ease-out; }
         @media (max-width: 1023px) {
           input:not([type="checkbox"]):not([type="radio"]),
           textarea,
           select {
             font-size: 16px !important;
           }
+          /* Input di sheet minimal setinggi 44px (area sentuh). */
+          .sheet-body input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not(.touch-compact),
+          .sheet-body select {
+            min-height: 44px;
+          }
         }
       `}</style>
 
       {/* ── TOOLBAR ATAS ─────────────────────────────────────────── */}
-      <div className="no-print flex items-center gap-2 px-4 py-2.5 bg-white border-b border-line shrink-0 flex-wrap">
+      <div className="no-print flex items-center gap-2 px-3 lg:px-4 py-2 lg:py-2.5 bg-white border-b border-line shrink-0">
         <button
           onClick={() => setPanelCollapsed((v) => !v)}
           className="hidden lg:flex w-8 h-8 items-center justify-center rounded-lg hover:bg-sand text-ink/50"
@@ -1751,32 +3846,33 @@ export default function InvoiceGenerator() {
             onClick={() => {
               setDocType("invoice");
               setShareNotice(null);
+              resetBundle();
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-3.5 lg:px-3 min-h-10 lg:min-h-0 lg:py-1.5 rounded-full text-xs font-medium transition-colors ${
               docType === "invoice" ? "bg-ink text-white" : "text-ink/60"
             }`}
           >
-            <FileText className="w-3.5 h-3.5" /> Invoice
+            <FileText className="w-3.5 h-3.5 hidden sm:block" /> Invoice
           </button>
           <button
             onClick={() => {
               setDocType("suratJalan");
               setShareNotice(null);
+              resetBundle();
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+            className={`flex items-center gap-1.5 px-3.5 lg:px-3 min-h-10 lg:min-h-0 lg:py-1.5 rounded-full text-xs font-medium transition-colors ${
               docType === "suratJalan" ? "bg-ink text-white" : "text-ink/60"
             }`}
           >
-            <Truck className="w-3.5 h-3.5" /> Surat Jalan
+            <Truck className="w-3.5 h-3.5 hidden sm:block" /> Surat Jalan
           </button>
         </div>
 
+        {/* Desktop: Preview + zoom + Keluar. HP: Preview pindah ke bar bawah,
+            Keluar pindah ke sheet ⚙️. */}
         <button
-          onClick={() => {
-            setPreviewAutoFit(true);
-            setShowFullPreview(true);
-          }}
-          className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-line text-ink/60 hover:border-ink hover:text-ink transition-colors mr-1"
+          onClick={openPreview}
+          className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-line text-ink/60 hover:border-ink hover:text-ink transition-colors lg:mr-1"
         >
           <Eye className="w-3.5 h-3.5" />
           Preview
@@ -1814,827 +3910,321 @@ export default function InvoiceGenerator() {
         </div>
 
         <button
-          onClick={handleLogout}
+          onClick={() => setConfirm({ kind: "logout" })}
           disabled={loggingOut}
           aria-label="Keluar"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 transition-colors disabled:opacity-60"
+          className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300 transition-colors disabled:opacity-60"
         >
           <LogOut className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">
-            {loggingOut ? "Keluar…" : "Keluar"}
-          </span>
+          <span>{loggingOut ? "Keluar…" : "Keluar"}</span>
         </button>
-      </div>
 
-      <div className="no-print lg:hidden flex items-center gap-1 bg-white border-b border-line px-3 py-2 shrink-0">
         <button
-          onClick={() => setMobileView("edit")}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors ${mobileView === "edit" ? "bg-ink text-white" : "text-ink/60"}`}
+          onClick={() => setSettingsOpen(true)}
+          aria-label="Pengaturan"
+          className="lg:hidden w-11 h-11 flex items-center justify-center rounded-full border border-line text-ink/70 active:bg-sand"
         >
-          <Pencil className="w-3.5 h-3.5" /> Edit
-        </button>
-        <button
-          onClick={() => {
-            setPreviewAutoFit(true);
-            setShowFullPreview(true);
-          }}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors text-ink/60`}
-        >
-          <Eye className="w-3.5 h-3.5" /> Preview
+          <Settings className="w-5 h-5" />
         </button>
       </div>
 
       <div className="flex-1 flex min-h-0 relative">
-        {/* ── SIDEBAR KIRI ─────────────────────────────────────────── */}
-        <div
-          className={`no-print bg-white border-r border-line flex flex-col shrink-0 h-full transition-all duration-200 ${
-            panelCollapsed ? "w-0 overflow-hidden" : "w-full lg:w-[380px]"
-          } ${mobileView === "preview" ? "hidden lg:flex" : "flex"}`}
-        >
-          <div className="flex-1 flex min-h-0">
-            {/* Rail tab vertikal */}
-            <div className="w-16 shrink-0 border-r border-line flex flex-col items-center gap-1 py-3 overflow-y-auto">
-              {sidebarTabs.map((t) => {
-                const Icon = t.icon;
-                const active = activeSidebarTab === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setActiveSidebarTab(t.id)}
-                    className={`w-14 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-medium transition-colors ${
-                      active ? "bg-ink text-white" : "text-ink/50 hover:bg-sand"
-                    }`}
-                  >
-                    <Icon className="w-4 h-4" />
-                    <span className="leading-tight text-center">{t.label}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex-1 flex flex-col min-h-0">
-              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
-                {activeSidebarTab === "customer" && docType === "invoice" && (
-                  <>
-                    <SidebarSectionHeader icon={User} label="Customer" />
-                    <div>
-                      <label className="text-xs font-medium text-ink/60">
-                        Nama Customer
-                      </label>
-                      <input
-                        placeholder="Nama customer"
-                        value={customerName}
-                        onChange={(e) =>
-                          handleCustomerNameChange(e.target.value)
-                        }
-                        className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                      />
-                      <p className="text-[11px] text-ink/40 mt-1">
-                        No. Invoice otomatis dibuat dari nama ini.
-                      </p>
-                    </div>
-                    <div>
-                      <label className="text-xs font-medium text-ink/60">
-                        Alamat (tagihan)
-                      </label>
-                      <textarea
-                        placeholder="Alamat (tagihan)"
-                        value={customer.address}
-                        onChange={(e) =>
-                          setCustomer((c) => ({
-                            ...c,
-                            address: e.target.value,
-                          }))
-                        }
-                        rows={2}
-                        className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow resize-none mt-1"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-xs font-medium text-ink/60">
-                          No. HP
-                        </label>
-                        <input
-                          placeholder="Opsional"
-                          value={customer.phone}
-                          onChange={(e) =>
-                            setCustomer((c) => ({
-                              ...c,
-                              phone: e.target.value,
-                            }))
-                          }
-                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-ink/60">
-                          Email
-                        </label>
-                        <input
-                          placeholder="Opsional"
-                          value={customer.email}
-                          onChange={(e) =>
-                            setCustomer((c) => ({
-                              ...c,
-                              email: e.target.value,
-                            }))
-                          }
-                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                        />
-                      </div>
-                    </div>
-                    <p className="text-[11px] text-ink/40 -mt-2">
-                      No. HP dipakai untuk membuka chat WhatsApp langsung ke
-                      customer saat Share.
-                    </p>
-                  </>
-                )}
-
-                {activeSidebarTab === "customer" &&
-                  docType === "suratJalan" && (
-                    <>
-                      <SidebarSectionHeader icon={Truck} label="Tujuan Kirim" />
-                      <div className="flex flex-col gap-2">
-                        <SidebarSubLabel>Alamat Pengiriman</SidebarSubLabel>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setShippingAddress((s) => ({
-                                ...s,
-                                sameAsCustomer: true,
-                              }))
-                            }
-                            className={`px-2.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                              shippingAddress.sameAsCustomer
-                                ? "bg-ink text-white border-ink"
-                                : "border-line text-ink/60 hover:border-ink"
-                            }`}
-                          >
-                            Sama dengan Invoice
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setShippingAddress((s) => ({
-                                ...s,
-                                sameAsCustomer: false,
-                              }))
-                            }
-                            className={`px-2.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                              !shippingAddress.sameAsCustomer
-                                ? "bg-ink text-white border-ink"
-                                : "border-line text-ink/60 hover:border-ink"
-                            }`}
-                          >
-                            Alamat Lain
-                          </button>
-                        </div>
-                        {!shippingAddress.sameAsCustomer && (
-                          <>
-                            <input
-                              placeholder="Nama penerima / gudang / outlet"
-                              value={shippingAddress.name}
-                              onChange={(e) =>
-                                setShippingAddress((s) => ({
-                                  ...s,
-                                  name: e.target.value,
-                                }))
-                              }
-                              className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                            />
-                            <textarea
-                              placeholder="Alamat pengiriman (gudang/outlet)"
-                              value={shippingAddress.address}
-                              onChange={(e) =>
-                                setShippingAddress((s) => ({
-                                  ...s,
-                                  address: e.target.value,
-                                }))
-                              }
-                              rows={2}
-                              className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow resize-none"
-                            />
-                            <input
-                              placeholder="No. HP penerima (opsional)"
-                              value={shippingAddress.phone}
-                              onChange={(e) =>
-                                setShippingAddress((s) => ({
-                                  ...s,
-                                  phone: e.target.value,
-                                }))
-                              }
-                              className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                            />
-                          </>
-                        )}
-                      </div>
-                    </>
-                  )}
-
-                {activeSidebarTab === "info" && (
-                  <>
-                    <SidebarSectionHeader
-                      icon={ClipboardList}
-                      label={docType === "invoice" ? "Invoice" : "Surat Jalan"}
-                    />
-                    {docType === "invoice" ? (
-                      <>
-                        <div className="flex items-center justify-between">
-                          <label className="text-xs font-medium text-ink/60">
-                            No. Invoice
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setInvoiceNumber(autoInvoiceNumber(customerName));
-                              setInvoiceNumberTouched(false);
-                            }}
-                            className="flex items-center gap-1 text-[11px] text-ink/40 hover:text-ink"
-                          >
-                            <RotateCcw className="w-3 h-3" /> Regenerate
-                          </button>
-                        </div>
-                        <input
-                          value={invoiceNumber}
-                          onChange={(e) => {
-                            setInvoiceNumber(e.target.value);
-                            setInvoiceNumberTouched(true);
-                          }}
-                          className="border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow font-data"
-                        />
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="text-xs font-medium text-ink/60">
-                              Tanggal
-                            </label>
-                            <input
-                              type="date"
-                              value={invoiceDate}
-                              onChange={(e) =>
-                                handleInvoiceDateChange(e.target.value)
-                              }
-                              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs font-medium text-ink/60">
-                              Jatuh Tempo
-                            </label>
-                            <input
-                              type="date"
-                              value={dueDate}
-                              onChange={(e) => setDueDate(e.target.value)}
-                              className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                            />
-                          </div>
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-ink/60">
-                            Termin Pembayaran (TOP)
-                          </label>
-                          <div className="flex items-center gap-1 flex-wrap mt-1">
-                            {TOP_OPTIONS.map((t) => {
-                              const val =
-                                t.days === null ? "custom" : String(t.days);
-                              const active =
-                                (topDays === null
-                                  ? "custom"
-                                  : String(topDays)) === val;
-                              return (
-                                <button
-                                  key={val}
-                                  type="button"
-                                  onClick={() => handleTopChange(t.days)}
-                                  className={`px-2.5 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-                                    active
-                                      ? "bg-ink text-white border-ink"
-                                      : "border-line text-ink/60 hover:border-ink"
-                                  }`}
-                                >
-                                  {t.label}
-                                </button>
-                              );
-                            })}
-                            {topDays === null && (
-                              <div className="flex items-center gap-1 pl-2.5 py-1 pr-2.5 rounded-full border border-ink bg-ink/5">
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={customTopDays}
-                                  onChange={(e) =>
-                                    handleCustomTopDaysChange(e.target.value)
-                                  }
-                                  placeholder="0"
-                                  className="w-10 bg-transparent outline-none text-xs font-medium text-right"
-                                />
-                                <span className="text-xs font-medium text-ink/60">
-                                  Hari
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div>
-                          <label className="text-xs font-medium text-ink/60">
-                            Batch Kirim
-                          </label>
-                          <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                            {shipments.map((s) => (
-                              <button
-                                key={s.id}
-                                type="button"
-                                onClick={() => setActiveShipmentId(s.id)}
-                                className={`flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-full text-xs font-medium border transition-colors ${
-                                  s.id === activeShipmentId
-                                    ? "bg-ink text-white border-ink"
-                                    : "border-line text-ink/60 hover:border-ink"
-                                }`}
-                              >
-                                SJ #{s.seq}
-                                {shipments.length > 1 && (
-                                  <span
-                                    role="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      removeShipment(s.id);
-                                    }}
-                                    className="opacity-60 hover:opacity-100 p-0.5"
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                  </span>
-                                )}
-                              </button>
-                            ))}
-                            <button
-                              type="button"
-                              onClick={addShipment}
-                              className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-line text-ink/50 hover:border-ink hover:text-ink"
-                            >
-                              <Plus className="w-3 h-3" /> SJ Baru
-                            </button>
-                          </div>
-                          <p className="text-[11px] text-ink/40 mt-1.5">
-                            Buat SJ baru kalau kirimannya dipecah beberapa kali
-                            — qty yang udah kepakai di batch lain otomatis gak
-                            bisa dobel diinput.
-                          </p>
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-ink/60">
-                            No. Surat Jalan
-                          </label>
-                          <div className="border border-line rounded-lg px-3 py-2 text-sm font-data bg-sand/40 text-ink/70 mt-1">
-                            {suratJalanNumber}
-                          </div>
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-ink/60">
-                            Tanggal Kirim (batch ini)
-                          </label>
-                          <input
-                            type="date"
-                            value={activeShipment?.date ?? todayISO()}
-                            onChange={(e) => updateShipmentDate(e.target.value)}
-                            className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs font-medium text-ink/60">
-                            Referensi Invoice
-                          </label>
-                          <div className="border border-line rounded-lg px-3 py-2 text-sm font-data bg-sand/40 text-ink/70 mt-1 break-words">
-                            <RefNumber value={invoiceNumber} />
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </>
-                )}
-
-                {docType === "invoice" && activeSidebarTab === "item" && (
-                  <>
-                    <SidebarSectionHeader icon={Package} label="Item & Harga" />
-                    <button
-                      onClick={addItem}
-                      className="flex items-center justify-center gap-1.5 border border-dashed border-line rounded-lg py-2 text-sm text-ink/60 hover:border-ink hover:text-ink transition-colors"
-                    >
-                      <Plus className="w-4 h-4" /> Tambah Baris Kosong
-                    </button>
-
-                    {items.length > 0 && (
-                      <div className="flex flex-col gap-2">
-                        {items.map((it) => (
-                          <div
-                            key={it.id}
-                            className="border border-line rounded-lg p-2.5 flex flex-col gap-1.5"
-                          >
-                            <div className="flex items-center gap-2">
-                              <div className="flex-1 min-w-0 text-xs font-medium">
-                                <ItemNameField
-                                  editable
-                                  value={it.name}
-                                  onChange={(v: string) =>
-                                    updateItem(it.id, { name: v })
-                                  }
-                                />
-                              </div>
-                              <button
-                                onClick={() => removeItem(it.id)}
-                                aria-label="Hapus baris"
-                                className="shrink-0"
-                              >
-                                <Trash2 className="w-3.5 h-3.5 text-ink/30 hover:text-brand" />
-                              </button>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div className="flex-1">
-                                <label className="text-[10px] text-ink/40">
-                                  Qty
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={it.qty}
-                                  onChange={(e) =>
-                                    updateItem(it.id, {
-                                      qty: Number(e.target.value),
-                                    })
-                                  }
-                                  className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                                />
-                              </div>
-                              <div className="flex-1">
-                                <label className="text-[10px] text-ink/40">
-                                  Harga
-                                </label>
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  value={it.price ? formatNumber(it.price) : ""}
-                                  onChange={(e) =>
-                                    updateItem(it.id, {
-                                      price: parseNumberInput(e.target.value),
-                                    })
-                                  }
-                                  placeholder="0"
-                                  className="w-full border border-line rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                                />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {docType === "invoice" && activeSidebarTab === "diskon" && (
-                  <>
-                    <SidebarSectionHeader
-                      icon={SlidersHorizontal}
-                      label="Tambahan"
-                    />
-                    <div className="flex flex-col gap-2">
-                      <SidebarSubLabel>Diskon</SidebarSubLabel>
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center gap-1">
-                          {[
-                            { label: "%", value: "percent" as const },
-                            { label: "Rp", value: "fixed" as const },
-                          ].map((o) => (
-                            <button
-                              key={o.value}
-                              type="button"
-                              onClick={() => setDiscountType(o.value)}
-                              className={`px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
-                                discountType === o.value
-                                  ? "bg-ink text-white border-ink"
-                                  : "border-line text-ink/60 hover:border-ink"
-                              }`}
-                            >
-                              {o.label}
-                            </button>
-                          ))}
-                        </div>
-                        <input
-                          type="number"
-                          min={0}
-                          value={discountValue || ""}
-                          onChange={(e) =>
-                            setDiscountValue(Number(e.target.value))
-                          }
-                          placeholder="0"
-                          className="flex-1 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                        />
-                      </div>
-                      {discountAmount > 0 && (
-                        <p className="text-[11px] text-brand">
-                          Potongan: -{currency(discountAmount)}
-                        </p>
-                      )}
-                    </div>
-
-                    <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
-                      <SidebarSubLabel>PPN</SidebarSubLabel>
-                      <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-2.5 cursor-pointer">
-                        <span className="text-sm text-ink/80">Kenakan PPN</span>
-                        <input
-                          type="checkbox"
-                          checked={taxEnabled}
-                          onChange={(e) => setTaxEnabled(e.target.checked)}
-                          className="w-4 h-4 accent-ink"
-                        />
-                      </label>
-                      {taxEnabled && (
-                        <>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              min={0}
-                              step="0.1"
-                              value={taxRate}
-                              onChange={(e) =>
-                                setTaxRate(Number(e.target.value))
-                              }
-                              className="w-24 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow"
-                            />
-                            <span className="text-sm text-ink/60">%</span>
-                          </div>
-                          {taxAmount > 0 && (
-                            <p className="text-[11px] text-ink/40">
-                              PPN: +{currency(taxAmount)}
-                            </p>
-                          )}
-                        </>
-                      )}
-                      <p className="text-[11px] text-ink/40">
-                        Dihitung dari subtotal setelah diskon. Ongkir tidak
-                        dikenai PPN.
-                      </p>
-                    </div>
-
-                    <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
-                      <SidebarSubLabel>Ongkos Kirim</SidebarSubLabel>
-                      <label className="text-xs font-medium text-ink/60">
-                        Biaya Ongkir (opsional)
-                      </label>
-                      <div className="flex items-center gap-1 border border-line rounded-lg px-3 py-2 focus-within:border-ink focus-within:ring-2 focus-within:ring-ink/5 transition-shadow">
-                        <span className="text-ink/40 text-xs">Rp</span>
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          value={shippingCost ? formatNumber(shippingCost) : ""}
-                          onChange={(e) =>
-                            setShippingCost(parseNumberInput(e.target.value))
-                          }
-                          placeholder="0"
-                          className="flex-1 bg-transparent text-sm outline-none"
-                        />
-                      </div>
-                      <p className="text-[11px] text-ink/40">
-                        Diisi kalau ongkirnya ditagihkan ke customer — otomatis
-                        ditambahkan ke Total di invoice. Kosongkan / isi 0 kalau
-                        gratis ongkir.
-                      </p>
-                    </div>
-                  </>
-                )}
-
-                {docType === "invoice" && activeSidebarTab === "rekening" && (
-                  <>
-                    <SidebarSectionHeader
-                      icon={Landmark}
-                      label="Rekening Bank"
-                    />
-                    <div>
-                      <label className="text-xs font-medium text-ink/60">
-                        Nama Bank
-                      </label>
-                      <input
-                        value={bank.bankName}
-                        onChange={(e) =>
-                          setBank((b) => ({ ...b, bankName: e.target.value }))
-                        }
-                        placeholder="Nama bank"
-                        className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs font-medium text-ink/60">
-                        No. Rekening
-                      </label>
-                      <input
-                        value={bank.accountNumber}
-                        onChange={(e) =>
-                          setBank((b) => ({
-                            ...b,
-                            accountNumber: e.target.value,
-                          }))
-                        }
-                        placeholder="No. rekening"
-                        className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs font-medium text-ink/60">
-                        Atas Nama
-                      </label>
-                      <input
-                        value={bank.accountHolder}
-                        onChange={(e) =>
-                          setBank((b) => ({
-                            ...b,
-                            accountHolder: e.target.value,
-                          }))
-                        }
-                        placeholder="Atas nama"
-                        className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                      />
-                    </div>
-                  </>
-                )}
-
-                {docType === "invoice" && activeSidebarTab === "ttd" && (
-                  <>
-                    <SidebarSectionHeader icon={PenTool} label="Tanda Tangan" />
-                    <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-2.5 cursor-pointer">
-                      <span className="text-sm text-ink/80">Tampilkan cap</span>
-                      <input
-                        type="checkbox"
-                        checked={showStamp}
-                        onChange={(e) => setShowStamp(e.target.checked)}
-                        className="w-4 h-4 accent-ink"
-                      />
-                    </label>
-                    <label className="flex items-center justify-center gap-2 border border-dashed border-line rounded-lg py-2.5 text-sm text-ink/60 hover:border-ink cursor-pointer transition-colors">
-                      <Upload className="w-4 h-4" />{" "}
-                      {signatureUrl ? "Ganti file" : "Upload tanda tangan"}
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleSignatureUpload}
-                        className="hidden"
-                      />
-                    </label>
-                    {!signatureUrl && (
-                      <p className="text-[11px] text-ink/40">
-                        Belum ada tanda tangan diupload — cuma cap yang bakal
-                        tampil di invoice.
-                      </p>
-                    )}
-                    {signatureUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setSignatureUrl(null)}
-                        className="text-[11px] text-ink/40 hover:text-brand self-start"
-                      >
-                        Hapus tanda tangan
-                      </button>
-                    )}
-
-                    <div className="flex flex-col gap-2 pt-4 mt-1 border-t border-line">
-                      <SidebarSubLabel>Penandatangan</SidebarSubLabel>
-                      <div>
-                        <label className="text-xs font-medium text-ink/60">
-                          Nama (opsional)
-                        </label>
-                        <input
-                          value={signerName}
-                          onChange={(e) => setSignerName(e.target.value)}
-                          placeholder="Contoh: Budi Santoso"
-                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-ink/60">
-                          Jabatan (opsional)
-                        </label>
-                        <input
-                          value={signerTitle}
-                          onChange={(e) => setSignerTitle(e.target.value)}
-                          placeholder="Contoh: Direktur"
-                          className="w-full border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-ink focus:ring-2 focus:ring-ink/5 transition-shadow mt-1"
-                        />
-                      </div>
-                      <p className="text-[11px] text-ink/40">
-                        Tampil di bawah garis tanda tangan. Kalau nama
-                        dikosongkan, yang tampil &quot;Makmur A3&apos;S&quot;.
-                      </p>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* ── Bar aksi: Share, PDF, Print ── */}
-          <div className="no-print shrink-0 border-t border-line p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white flex flex-col gap-2">
-            {shareNotice && (
-              <div className="flex items-start gap-2 bg-sand/60 border border-line rounded-lg px-3 py-2 text-[11px] text-ink/70 leading-relaxed">
-                <span className="flex-1">{getShareNoticeText()}</span>
-                <button
-                  type="button"
-                  onClick={() => setShareNotice(null)}
-                  aria-label="Tutup"
-                  className="text-ink/40 hover:text-ink shrink-0"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-            <div className="grid grid-cols-3 gap-2">
-              <div ref={shareBtnRef} className="relative">
-                <button
-                  onClick={handleShareClick}
-                  disabled={busy === "share"}
-                  className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-ink text-white py-2.5 text-xs font-medium hover:bg-ink/90 transition-colors disabled:opacity-60"
-                >
-                  <Share2 className="w-3.5 h-3.5" />
-                  {busy === "share" ? "Memproses…" : "Share"}
-                </button>
-
-                {shareMenuOpen && (
-                  <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-line rounded-lg shadow-lg overflow-hidden z-20">
-                    <p className="px-3 pt-2.5 pb-1.5 text-[10px] uppercase tracking-wide text-ink/40 font-semibold">
-                      Bagikan lewat
-                    </p>
-                    <button
-                      onClick={() => handleShareFallback("wa")}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink/80 hover:bg-sand transition-colors"
-                    >
-                      <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded-full bg-[#25D366] text-white">
-                        <WhatsAppIcon className="w-3 h-3" />
-                      </span>
-                      WhatsApp
-                    </button>
-                    <button
-                      onClick={() => handleShareFallback("email")}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-ink/80 hover:bg-sand transition-colors border-t border-line"
-                    >
-                      <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded-full bg-ink text-white">
-                        <Mail className="w-3 h-3" />
-                      </span>
-                      Email
-                    </button>
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={handleDownloadPdf}
-                disabled={busy === "pdf"}
-                className="flex items-center justify-center gap-1.5 rounded-lg border border-line py-2.5 text-xs font-medium text-ink/80 hover:bg-sand hover:border-ink/30 transition-colors disabled:opacity-60"
-              >
-                <Download className="w-3.5 h-3.5" />
-                {busy === "pdf" ? "Memproses…" : "PDF"}
-              </button>
-              <button
-                onClick={handlePrint}
-                className="flex items-center justify-center gap-1.5 rounded-lg border border-line py-2.5 text-xs font-medium text-ink/80 hover:bg-sand hover:border-ink/30 transition-colors"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                Print
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* ── CANVAS (zoomable) ────────────────────────────────────── */}
-        <div
-          ref={canvasWrapRef}
-          className={`flex-1 h-full overflow-auto flex items-start p-6 relative ${mobileView === "edit" ? "hidden lg:flex" : "flex"}`}
-        >
+        {/* ── SIDEBAR KIRI (desktop) ───────────────────────────────── */}
+        {showDesktop && (
           <div
-            className="mx-auto shrink-0"
-            style={{ width: canvasSize.w * zoom, height: canvasSize.h * zoom }}
+            className={`no-print bg-white border-r border-line flex flex-col shrink-0 h-full transition-all duration-200 ${
+              panelCollapsed ? "w-0 overflow-hidden" : "w-[380px]"
+            }`}
+          >
+            <div className="flex-1 flex min-h-0">
+              {/* Rail tab vertikal */}
+              <div className="w-16 shrink-0 border-r border-line flex flex-col items-center gap-1 py-3 overflow-y-auto">
+                {sidebarTabs.map((t) => {
+                  const Icon = t.icon;
+                  const active = activeSidebarTab === t.id;
+                  // Titik peringatan: materai -> tab TTD, Faktur Pajak -> tab Tambahan.
+                  const alert =
+                    (t.id === "ttd" && showMateraiNotice) ||
+                    (t.id === "diskon" && showPpnNotice);
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setActiveSidebarTab(t.id)}
+                      className={`relative w-14 flex flex-col items-center gap-1 py-2 rounded-lg text-[10px] font-medium transition-colors ${
+                        active
+                          ? "bg-ink text-white"
+                          : "text-ink/50 hover:bg-sand"
+                      }`}
+                    >
+                      {alert && (
+                        <span
+                          className="absolute top-1.5 right-2 w-2 h-2 rounded-full bg-amber-500"
+                          aria-label="Ada peringatan"
+                        />
+                      )}
+                      <Icon className="w-4 h-4" />
+                      <span className="leading-tight text-center">
+                        {t.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex-1 min-w-0 flex flex-col min-h-0">
+                <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain p-4 flex flex-col gap-4">
+                  {tabContent}
+                </div>
+              </div>
+            </div>
+
+            {renderActionBar()}
+          </div>
+        )}
+
+        {/* ── CANVAS (zoomable, desktop) ───────────────────────────── */}
+        {showDesktop && (
+          <div
+            ref={canvasWrapRef}
+            className="flex-1 h-full overflow-auto flex items-start p-6 relative"
           >
             <div
+              className="mx-auto shrink-0"
               style={{
-                transform: `scale(${zoom})`,
-                transformOrigin: "top left",
-                width: "max-content",
+                width: canvasSize.w * zoom,
+                height: canvasSize.h * zoom,
               }}
             >
               <div
-                ref={pageRef}
-                className="rounded-2xl border border-line shadow-sm overflow-hidden"
+                style={{
+                  transform: `scale(${zoom})`,
+                  transformOrigin: "top left",
+                  width: "max-content",
+                }}
               >
-                <InvoiceDocument editable {...docProps} />
+                <div
+                  ref={pageRef}
+                  className="rounded-2xl border border-line shadow-sm overflow-hidden"
+                >
+                  <InvoiceDocument editable {...docProps} />
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
+
+        {/* ── LAYAR UTAMA HP: dokumen, ketuk bagian untuk mengedit ─── */}
+        {showMobile && (
+          <div ref={mobileWrapRef} className="flex-1 min-h-0 overflow-auto p-3">
+            <p className="text-[11px] text-ink/50 text-center mb-2">
+              Ketuk bagian dokumen untuk mengedit
+            </p>
+            <div
+              className="mx-auto shrink-0"
+              style={{
+                width: mobileSize.w * mobileZoom,
+                height: mobileSize.h * mobileZoom,
+              }}
+            >
+              <div
+                style={{
+                  transform: `scale(${mobileZoom})`,
+                  transformOrigin: "top left",
+                  width: "max-content",
+                }}
+              >
+                <div
+                  ref={mobilePageRef}
+                  className="rounded-2xl border border-line shadow-sm overflow-hidden"
+                >
+                  <InvoiceDocument
+                    editable={false}
+                    {...docProps}
+                    onEdit={openSheet}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* ── BAR BAWAH HP: Total · Perbesar · Bagikan ─────────────── */}
+      {showMobile && (
+        <div className="no-print shrink-0 bg-white border-t border-line px-3 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center gap-2">
+          <div className="min-w-0 mr-auto">
+            <p className="text-[11px] text-ink/50 leading-tight">
+              {docType === "invoice" ? "Total" : "Surat Jalan"}
+            </p>
+            <p className="text-base font-semibold leading-tight truncate">
+              {docType === "invoice"
+                ? currency(grandTotal)
+                : `SJ #${activeShipment?.seq ?? 1}`}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={openPreview}
+            className="shrink-0 flex items-center justify-center gap-1.5 min-h-11 px-4 rounded-lg border border-line text-xs font-medium text-ink/80 active:bg-sand"
+          >
+            <ZoomIn className="w-4 h-4" /> Perbesar
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setShareMenuOpen(false);
+              setShareSheetOpen(true);
+            }}
+            className="shrink-0 flex items-center justify-center gap-1.5 min-h-11 px-5 rounded-lg bg-ink text-white text-xs font-medium active:bg-ink/90"
+          >
+            <Share2 className="w-4 h-4" /> Bagikan
+            {(showMateraiNotice || showPpnNotice) && (
+              <span
+                className="w-2 h-2 rounded-full bg-amber-400"
+                aria-label="Ada peringatan"
+              />
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* ── SHEET: edit bagian dokumen (HP) ──────────────────────── */}
+      {showMobile && (
+        <BottomSheet
+          open={sheetOpen}
+          title={sheetTitle}
+          onClose={() => setSheetOpen(false)}
+        >
+          <div className="flex flex-col gap-4">{tabContent}</div>
+        </BottomSheet>
+      )}
+
+      {/* ── SHEET: Bagikan (HP) — bundling, PDF, share ───────────── */}
+      {showMobile && (
+        <BottomSheet
+          open={shareSheetOpen}
+          title="Bagikan"
+          onClose={() => setShareSheetOpen(false)}
+        >
+          <div className="flex flex-col gap-3">
+            {shareNoticeBox}
+            {noticeChips}
+
+            <div className="border border-line rounded-lg px-3 py-1 flex flex-col">
+              {bundleUi}
+              {docCount > 1 && (
+                <BundleCheck
+                  checked={mergePdf}
+                  disabled={false}
+                  label="Gabungkan jadi 1 file PDF"
+                  onChange={setMergePdf}
+                />
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleShareClick}
+              disabled={busy === "share"}
+              className="w-full flex items-center justify-center gap-2 min-h-12 rounded-lg bg-ink text-white text-sm font-medium disabled:opacity-60"
+            >
+              <Share2 className="w-4 h-4 shrink-0" />
+              <span className="truncate">
+                {busy === "share" ? "Memproses…" : shareLabel}
+              </span>
+            </button>
+
+            {shareMenuOpen && (
+              <div className="border border-line rounded-lg overflow-hidden">
+                <p className="px-3 pt-2.5 pb-1.5 text-[10px] uppercase tracking-wide text-ink/40 font-semibold">
+                  Bagikan lewat
+                </p>
+                <button
+                  type="button"
+                  onClick={() => handleShareFallback("wa")}
+                  className="w-full flex items-center gap-3 px-3 min-h-12 text-sm text-ink/80 active:bg-sand"
+                >
+                  <span className="w-7 h-7 shrink-0 flex items-center justify-center rounded-full bg-[#25D366] text-white">
+                    <WhatsAppIcon className="w-4 h-4" />
+                  </span>
+                  WhatsApp
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleShareFallback("email")}
+                  className="w-full flex items-center gap-3 px-3 min-h-12 text-sm text-ink/80 active:bg-sand border-t border-line"
+                >
+                  <span className="w-7 h-7 shrink-0 flex items-center justify-center rounded-full bg-ink text-white">
+                    <Mail className="w-4 h-4" />
+                  </span>
+                  Email
+                </button>
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={busy === "pdf"}
+              className="w-full flex items-center justify-center gap-2 min-h-12 rounded-lg border border-line text-sm font-medium text-ink/80 active:bg-sand disabled:opacity-60"
+            >
+              <Download className="w-4 h-4 shrink-0" />
+              <span className="truncate">
+                {busy === "pdf" ? "Memproses…" : `Unduh ${pdfLabel}`}
+              </span>
+            </button>
+          </div>
+        </BottomSheet>
+      )}
+
+      {/* ── SHEET: Pengaturan ⚙️ (HP) ────────────────────────────── */}
+      {showMobile && (
+        <BottomSheet
+          open={settingsOpen}
+          title="Pengaturan"
+          onClose={() => setSettingsOpen(false)}
+        >
+          <div className="flex flex-col gap-4">
+            {tampilanUi}
+            <div className="pt-4 border-t border-line">
+              <button
+                type="button"
+                onClick={() => {
+                  setSettingsOpen(false);
+                  setConfirm({ kind: "logout" });
+                }}
+                className="w-full flex items-center justify-center gap-2 min-h-12 rounded-lg border border-red-200 text-red-600 text-sm font-medium active:bg-red-50"
+              >
+                <LogOut className="w-4 h-4" /> Keluar
+              </button>
+            </div>
+          </div>
+        </BottomSheet>
+      )}
+
+      {/* ── KONFIRMASI hapus SJ / keluar ─────────────────────────── */}
+      <ConfirmDialog
+        open={confirm !== null}
+        title={
+          confirm?.kind === "logout"
+            ? "Keluar dari Invoice Generator?"
+            : `Hapus SJ #${confirmShipment?.seq ?? ""}?`
+        }
+        message={
+          confirm?.kind === "logout"
+            ? "Data invoice yang sedang dibuat akan hilang kalau belum diunduh atau dibagikan."
+            : "Pengiriman ini dan isinya akan dihapus. Nomor SJ berikutnya akan dirapatkan otomatis."
+        }
+        confirmLabel={confirm?.kind === "logout" ? "Keluar" : "Hapus"}
+        onConfirm={handleConfirm}
+        onCancel={() => setConfirm(null)}
+      />
 
       {/* ── FULL PREVIEW OVERLAY ─────────────────────────────────── */}
       {showFullPreview && (
         <div className="no-print fixed inset-0 z-[200] bg-ink/60 backdrop-blur-sm flex flex-col">
-          <div className="flex items-center gap-2 px-4 py-3 bg-white border-b border-line shrink-0">
+          <div className="flex items-center gap-2 px-4 py-2 lg:py-3 bg-white border-b border-line shrink-0">
             <Eye className="w-4 h-4 text-ink/50" />
             <span className="font-display text-sm">
               Preview {docType === "invoice" ? "Invoice" : "Surat Jalan"}
@@ -2645,9 +4235,10 @@ export default function InvoiceGenerator() {
                   setPreviewAutoFit(false);
                   setPreviewZoom((z) => Math.max(0.2, z - 0.1));
                 }}
-                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
+                className="w-10 h-10 lg:w-7 lg:h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
+                aria-label="Perkecil"
               >
-                <ZoomOut className="w-3.5 h-3.5" />
+                <ZoomOut className="w-4 h-4 lg:w-3.5 lg:h-3.5" />
               </button>
               <span className="text-xs text-ink/50 w-10 text-center font-data">
                 {Math.round(previewZoom * 100)}%
@@ -2655,22 +4246,23 @@ export default function InvoiceGenerator() {
               <button
                 onClick={() => {
                   setPreviewAutoFit(false);
-                  setPreviewZoom((z) => Math.min(2, z + 0.1));
+                  setPreviewZoom((z) => Math.min(3, z + 0.1));
                 }}
-                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
+                className="w-10 h-10 lg:w-7 lg:h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
+                aria-label="Perbesar"
               >
-                <ZoomIn className="w-3.5 h-3.5" />
+                <ZoomIn className="w-4 h-4 lg:w-3.5 lg:h-3.5" />
               </button>
               <button
                 onClick={() => setPreviewAutoFit(true)}
-                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
+                className="w-10 h-10 lg:w-7 lg:h-7 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60"
                 aria-label="Fit ke layar"
               >
-                <Maximize2 className="w-3.5 h-3.5" />
+                <Maximize2 className="w-4 h-4 lg:w-3.5 lg:h-3.5" />
               </button>
               <button
                 onClick={() => setShowFullPreview(false)}
-                className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60 ml-1"
+                className="w-11 h-11 lg:w-8 lg:h-8 flex items-center justify-center rounded-lg hover:bg-sand text-ink/60 ml-1"
                 aria-label="Tutup preview"
               >
                 <X className="w-4 h-4" />
@@ -2680,6 +4272,16 @@ export default function InvoiceGenerator() {
           <div
             ref={previewWrapRef}
             className="flex-1 overflow-auto flex items-start p-3 sm:p-8"
+            style={{ touchAction: "pan-x pan-y" }}
+            onClick={(e) => {
+              // Klik di area gelap (di luar dokumen) menutup preview.
+              if (
+                previewPageRef.current &&
+                !previewPageRef.current.contains(e.target as Node)
+              ) {
+                setShowFullPreview(false);
+              }
+            }}
           >
             <div
               className="mx-auto shrink-0"
@@ -2704,42 +4306,27 @@ export default function InvoiceGenerator() {
               </div>
             </div>
           </div>
-          <div className="no-print shrink-0 border-t border-line bg-white p-3 flex items-center justify-center gap-2">
-            <button
-              onClick={() => setShowFullPreview(false)}
-              className="flex items-center justify-center gap-1.5 rounded-lg border border-line px-4 py-2 text-xs font-medium text-ink/80 hover:bg-sand transition-colors"
-            >
-              <Pencil className="w-3.5 h-3.5" /> Kembali Edit
-            </button>
-            <button
-              onClick={handleShareClick}
-              disabled={busy === "share"}
-              className="flex items-center justify-center gap-1.5 rounded-lg bg-ink text-white px-4 py-2 text-xs font-medium hover:bg-ink/90 transition-colors disabled:opacity-60"
-            >
-              <Share2 className="w-3.5 h-3.5" />
-              {busy === "share" ? "Memproses…" : "Share"}
-            </button>
-            <button
-              onClick={handleDownloadPdf}
-              disabled={busy === "pdf"}
-              className="flex items-center justify-center gap-1.5 rounded-lg border border-line px-4 py-2 text-xs font-medium text-ink/80 hover:bg-sand transition-colors disabled:opacity-60"
-            >
-              <Download className="w-3.5 h-3.5" />
-              {busy === "pdf" ? "Memproses…" : "PDF"}
-            </button>
-          </div>
         </div>
       )}
 
-      {/* Versi statis tersembunyi — dipakai KHUSUS buat print & PDF. */}
-      <div
-        style={{ position: "fixed", top: 0, left: "-10000px", zIndex: -1 }}
-        aria-hidden
-      >
-        <div id="invoice-export-area" ref={exportRef}>
-          <InvoiceDocument editable={false} {...docProps} />
-        </div>
-      </div>
+      {/* Versi statis tersembunyi — dipakai KHUSUS buat print & PDF. Dirender
+          lewat portal langsung ke <body> supaya tidak terpotong ancestor
+          (fixed/overflow-hidden) saat print. Tiap dokumen punya wrapper
+          sendiri ([data-export-doc]) supaya bisa di-capture satu per satu
+          dan dipisah halaman saat print. */}
+      {mounted &&
+        createPortal(
+          <div id="print-portal" aria-hidden>
+            <div id="invoice-export-area" ref={exportRef}>
+              {exportDocs.map((d) => (
+                <div key={d.key} data-export-doc data-export-key={d.key}>
+                  <InvoiceDocument editable={false} {...d.props} />
+                </div>
+              ))}
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

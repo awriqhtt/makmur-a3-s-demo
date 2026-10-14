@@ -4,10 +4,12 @@ export default function Logomark({
   dark = false,
   compact = false,
   unoptimized = false,
+  markOnly = false,
 }: {
   dark?: boolean;
   compact?: boolean;
   unoptimized?: boolean;
+  markOnly?: boolean;
 }) {
   return (
     <div
@@ -23,7 +25,7 @@ export default function Logomark({
         unoptimized={unoptimized}
         className={compact ? "h-6 w-auto" : "h-8 w-auto md:h-10"}
       />
-      {!compact && (
+      {!compact && !markOnly && (
         <div className="leading-tight" suppressHydrationWarning>
           <div
             className={`font-display text-[15px] md:text-base leading-none ${dark ? "text-white" : "text-ink"}`}
