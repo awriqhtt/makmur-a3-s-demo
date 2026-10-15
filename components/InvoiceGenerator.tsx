@@ -56,6 +56,40 @@ const MATERAI_THRESHOLD = 5_000_000;
 // di layar ~390px akan scroll horizontal; pinch-zoom / tombol Fit tersedia).
 const READABLE_ZOOM = 0.85;
 
+// ── Ukuran halaman untuk export / print / preview ────────────────────────
+// Lebar dokumen 780px. Tinggi 1100px = rasio A4 (210:297) dikurangi sedikit
+// supaya hasil PDF (296,2mm) dan hasil print (291mm) tidak pernah meluber
+// ke halaman tambahan akibat pembulatan.
+const PAGE_W = 780;
+const PAGE_H = 1100;
+// Ruang cadangan di dasar halaman (jaga-jaga selisih pembulatan ukuran).
+const PAGE_SAFE = 22;
+// Saat blok akhir (total + rekening + TTD) tidak muat, paling banyak sekian
+// baris item terakhir ikut pindah supaya tanda tangan tidak sendirian.
+const MAX_CARRY_ROWS = 1;
+
+// Maksimal tambahan padding per baris (px, total atas+bawah) saat halaman
+// yang bukan terakhir direnggangkan supaya tidak terlihat kosong.
+const MAX_STRETCH = 16;
+
+// Tinggi tombol "Tambah baris" di editor (mt-2 = 8px + tinggi 16px). Tinggi
+// ini dikurangkan dari margin bawah tabel supaya tombol tidak mengubah posisi
+// blok di bawahnya -> layout editor identik dengan PDF.
+const ADD_ROW_H = 24;
+
+// Level kepadatan: 0 normal, 1 rapat, 2 sangat rapat.
+// pad = padding halaman (margin), gap = jarak kop ke body, meta = jarak blok
+// customer ke tabel, tbl = jarak bawah tabel, tot = padding bawah blok total,
+// row = padding atas/bawah tiap baris item. Level 0 = tampilan asli.
+const DENSITY = [
+  { pad: 40, gap: 24, meta: 32, tbl: 24, tot: 24, row: 8 },
+  { pad: 32, gap: 16, meta: 20, tbl: 16, tot: 16, row: 5 },
+  { pad: 24, gap: 12, meta: 12, tbl: 12, tot: 12, row: 3 },
+];
+
+// Lokasi gambar cap perusahaan (public/invoice/cap.png).
+const STAMP_SRC = "/invoice/cap.png";
+
 const TOP_OPTIONS = [
   { label: "Cash / COD", days: 0 },
   { label: "7 Hari", days: 7 },
@@ -167,6 +201,16 @@ type BuiltPdf = { fileName: string; pdf: import("jspdf").jsPDF };
 
 // Dialog konfirmasi yang sedang aktif (hapus SJ / keluar).
 type ConfirmState = { kind: "logout" } | { kind: "shipment"; id: string };
+
+// Satu halaman hasil paginasi: baris item [start, end), apakah blok total
+// ada di halaman ini, dan apakah blok rekening + tanda tangan ada di sini.
+type PageSlice = {
+  start: number;
+  end: number;
+  total: boolean;
+  rest: boolean;
+  pad?: number; // tambahan padding per baris (px) untuk halaman ini
+};
 
 function currency(n: number) {
   return new Intl.NumberFormat("id-ID", {
@@ -413,6 +457,191 @@ const nextFrames = () =>
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+// ── Paginasi ─────────────────────────────────────────────────────────────
+// Isi baris item halaman demi halaman (greedy). Halaman pertama punya
+// kapasitas `cap1` (karena ada blok customer/meta), halaman lanjutan `capC`.
+// Satu baris tidak pernah terbelah, dan tiap halaman minimal berisi 1 baris.
+function layoutRows(h: number[], n: number, cap1: number, capC: number) {
+  const pages: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < n) {
+    const cap = pages.length === 0 ? cap1 : capC;
+    const start = i;
+    let used = 0;
+    while (i < n && (i === start || used + h[i] <= cap)) {
+      used += h[i];
+      i++;
+    }
+    pages.push({ start, end: i });
+  }
+  return pages;
+}
+
+// h = tinggi tiap baris item, totalH = tinggi blok subtotal..Total, restH =
+// tinggi blok rekening + tanda tangan, addH = tinggi tombol "Tambah baris"
+// (hanya di editor, 0 untuk preview/PDF/print).
+// Total + rekening + TTD adalah SATU blok yang tidak pernah dipecah.
+// Aturan:
+// 1. Baris item diisi PENUH halaman demi halaman (greedy).
+// 2. Blok akhir muat di sisa halaman terakhir -> selesai.
+// 3. Tidak muat -> blok akhir pindah ke halaman baru. Supaya halaman itu
+//    tidak berisi tanda tangan saja, MAX_CARRY_ROWS baris terakhir ikut
+//    pindah, tapi hanya kalau memang muat bersama blok akhir.
+function computePageSlices(
+  h: number[],
+  cap1: number,
+  capC: number,
+  totalH: number,
+  restH: number,
+  addH: number,
+): PageSlice[] {
+  const n = h.length;
+  if (n === 0) return [{ start: 0, end: 0, total: true, rest: true }];
+  const sum = (a: number, b: number) => {
+    let s = 0;
+    for (let i = a; i < b; i++) s += h[i];
+    return s;
+  };
+
+  const pages = layoutRows(h, n, cap1, capC);
+  const last = pages[pages.length - 1];
+  const lastCap = pages.length === 1 ? cap1 : capC;
+  const used = sum(last.start, last.end) + addH;
+
+  // 2. Semua muat.
+  if (used + totalH + restH <= lastCap) {
+    return pages.map((p, i) => ({
+      ...p,
+      total: i === pages.length - 1,
+      rest: i === pages.length - 1,
+    }));
+  }
+
+  // 3. Blok akhir pindah. Bawa baris terakhir hanya jika muat bersama blok
+  // akhir; kalau tidak, blok akhir berdiri di halaman sendiri.
+  let m = n > 1 ? Math.min(MAX_CARRY_ROWS, n - 1) : 0;
+  while (m > 0 && sum(n - m, n) + addH + totalH + restH > capC) m--;
+  const pre = layoutRows(h, n - m, cap1, capC).map((p) => ({
+    ...p,
+    total: false,
+    rest: false,
+  }));
+  return [...pre, { start: n - m, end: n, total: true, rest: true }];
+}
+
+// Renggangkan baris di halaman yang BUKAN halaman terakhir supaya ruang
+// kosong di dasar halaman terisi (halaman 1 tetap terlihat penuh).
+function stretchPages(
+  slices: PageSlice[],
+  h: number[],
+  cap1: number,
+  capC: number,
+  totalH: number,
+): PageSlice[] {
+  if (slices.length <= 1) return slices;
+  return slices.map((s, i) => {
+    if (s.rest) return s; // halaman akhir: biarkan
+    const n = s.end - s.start;
+    if (n <= 0) return s;
+    let used = 0;
+    for (let k = s.start; k < s.end; k++) used += h[k];
+    const cap = i === 0 ? cap1 : capC;
+    const gap = cap - used - (s.total ? totalH : 0) - 4; // 4px pengaman
+    const pad = Math.floor(Math.min(Math.max(gap / n, 0), MAX_STRETCH));
+    return { ...s, pad };
+  });
+}
+
+// ── Cap perusahaan (gambar) ──────────────────────────────────────────────
+// Gambar cap dimuat sekali. Kalau file-nya masih berlatar putih (bukan PNG
+// transparan), latar putihnya dihapus otomatis lewat canvas supaya cap tidak
+// menutupi tanda tangan. Hasilnya berupa data URL, jadi aman untuk html2canvas.
+let stampSrcCache: string | null | undefined; // undefined = belum selesai dimuat
+let stampPromise: Promise<string | null> | null = null;
+
+function loadStamp(): Promise<string | null> {
+  if (stampPromise) return stampPromise;
+  stampPromise = new Promise<string | null>((resolve) => {
+    const finish = (v: string | null) => {
+      stampSrcCache = v;
+      resolve(v);
+    };
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement("canvas");
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const ctx = c.getContext("2d");
+        if (!ctx) return finish(STAMP_SRC);
+        ctx.drawImage(img, 0, 0);
+        const data = ctx.getImageData(0, 0, c.width, c.height);
+        const px = data.data;
+        // Sudah transparan: pakai apa adanya.
+        if (px[3] < 250) return finish(STAMP_SRC);
+
+        // Warna tinta = rata-rata piksel merah gelap.
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > 120 && px[i + 1] < 90 && px[i + 2] < 90) {
+            r += px[i];
+            g += px[i + 1];
+            b += px[i + 2];
+            n++;
+          }
+        }
+        const ink = n ? [r / n, g / n, b / n] : [184, 24, 18];
+        const inkMin = Math.min(ink[0], ink[1], ink[2]);
+
+        for (let i = 0; i < px.length; i += 4) {
+          const min = Math.min(px[i], px[i + 1], px[i + 2]);
+          let t = (255 - min) / (255 - inkMin);
+          t = Math.min(Math.max(t, 0), 1);
+          if (t < 0.08) t = 0; // buang noise tipis dari kompresi JPEG
+          px[i] = ink[0];
+          px[i + 1] = ink[1];
+          px[i + 2] = ink[2];
+          px[i + 3] = Math.round(t * 255);
+        }
+        ctx.putImageData(data, 0, 0);
+        finish(c.toDataURL("image/png"));
+      } catch {
+        finish(STAMP_SRC);
+      }
+    };
+    img.onerror = () => finish(null);
+    img.src = STAMP_SRC;
+  });
+  return stampPromise;
+}
+
+function StampImage({
+  className = "",
+  style,
+}: {
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  const [src, setSrc] = useState<string | null | undefined>(stampSrcCache);
+  useEffect(() => {
+    let alive = true;
+    loadStamp().then((v) => {
+      if (alive) setSrc(v);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  if (!src) return null;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={src} alt="Cap perusahaan" className={className} style={style} />
+  );
+}
+
 function WhatsAppIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -427,65 +656,12 @@ function WhatsAppIcon({ className = "" }: { className?: string }) {
   );
 }
 
-// Cap perusahaan berbentuk kotak (border ganda, nama di tengah). Semua teks
-// lurus (tanpa textPath) jadi aman dirender html2canvas.
-function InvoiceStamp() {
-  return (
-    <svg
-      viewBox="0 0 160 100"
-      className="w-28 h-auto opacity-80"
-      style={{ transform: "rotate(-6deg)" }}
-    >
-      <rect
-        x="3"
-        y="3"
-        width="154"
-        height="94"
-        rx="4"
-        fill="none"
-        stroke="#B81812"
-        strokeWidth="3"
-      />
-      <rect
-        x="9"
-        y="9"
-        width="142"
-        height="82"
-        rx="2"
-        fill="none"
-        stroke="#B81812"
-        strokeWidth="1.2"
-      />
-      <text
-        x="80"
-        y="44"
-        textAnchor="middle"
-        fill="#B81812"
-        fontSize="16"
-        fontWeight="800"
-        letterSpacing="0.5"
-      >
-        MAKMUR A3&apos;S
-      </text>
-      <line x1="26" y1="53" x2="134" y2="53" stroke="#B81812" strokeWidth="1" />
-      <text
-        x="80"
-        y="69"
-        textAnchor="middle"
-        fill="#B81812"
-        fontSize="9"
-        fontWeight="700"
-        letterSpacing="1.5"
-      >
-        SUPPLY &amp; PACKAGING
-      </text>
-    </svg>
-  );
-}
-
+// Watermark di tengah SELURUH kertas (kop menutupinya dengan latar putih),
+// jadi posisinya identik di setiap halaman. Ukuran & kemiringan sama dengan
+// versi awal.
 function Watermark() {
   return (
-    <div className="absolute inset-y-0 -inset-x-6 md:-inset-x-10 flex items-center justify-center pointer-events-none select-none z-0">
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none z-0">
       <span
         className="text-[6rem] font-black text-ink whitespace-nowrap"
         style={{ opacity: 0.035, transform: "rotate(-18deg)" }}
@@ -596,7 +772,7 @@ function Field({
       if (showPlaceholder && placeholder) {
         return (
           <span
-            className={`${widthClass} ${className} inline-block italic !text-ink/30`}
+            className={`${widthClass} ${className} block italic !text-ink/30`}
           >
             {placeholder}
           </span>
@@ -605,9 +781,7 @@ function Field({
       return null;
     }
     return (
-      <span
-        className={`${widthClass} ${className} whitespace-pre-line inline-block`}
-      >
+      <span className={`${widthClass} ${className} whitespace-pre-line block`}>
         {value}
       </span>
     );
@@ -618,7 +792,17 @@ function Field({
         value={value}
         onChange={(e) => onChange?.(e.target.value)}
         placeholder={placeholder}
-        rows={2}
+        rows={1}
+        // Tinggi textarea mengikuti isi (seperti teks statis di PDF), bukan
+        // tetap 2 baris. Border 1px dikompensasi margin -1px.
+        style={
+          {
+            fieldSizing: "content",
+            padding: 0,
+            margin: "-1px 0",
+            display: "block",
+          } as React.CSSProperties
+        }
         className={`${widthClass} bg-transparent border border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors resize-none rounded ${className}`}
       />
     );
@@ -629,7 +813,7 @@ function Field({
       value={value}
       onChange={(e) => onChange?.(e.target.value)}
       placeholder={placeholder}
-      className={`${widthClass} bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors ${className}`}
+      className={`${widthClass} block -mb-px bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors ${className}`}
     />
   );
 }
@@ -1034,7 +1218,14 @@ function BottomSheet({
 
 // ── Dokumen bersama — dipakai TIGA cara: editable (canvas desktop),
 // non-editable + onEdit (layar utama HP: ketuk bagian untuk edit lewat
-// bottom sheet), dan non-editable biasa (preview + versi export). ───────
+// bottom sheet), dan non-editable biasa (preview + versi export).
+//
+// Mode `paged` dipakai untuk canvas / preview / PDF / print: dokumen dipecah
+// jadi halaman A4 tetap (PAGE_W x PAGE_H). Kop selalu dirender di tiap
+// halaman; blok customer/meta hanya di halaman pertama; tabel hanya memuat
+// baris [rowStart, rowEnd); blok total (showTotal) dan blok rekening + tanda
+// tangan (showRest) bisa berada di halaman berbeda. Tombol "Tambah baris"
+// (showAddRow) hanya dirender di halaman terakhir yang punya tabel. ────────
 function InvoiceDocument({
   editable,
   onEdit,
@@ -1074,9 +1265,33 @@ function InvoiceDocument({
   updateShipTo,
   sjRows,
   updateSjItem,
+  paged = false,
+  rowStart = 0,
+  rowEnd,
+  showMeta = true,
+  showTotal = true,
+  showRest = true,
+  showAddRow = true,
+  showTable = true,
+  density = 0,
+  rowExtra = 0,
+  pageNo = 1,
+  pageCount = 1,
 }: any) {
   const isSJ = docType === "suratJalan";
+  // Kepadatan: level lebih tinggi = margin/spasi lebih rapat supaya dokumen
+  // yang meluber tipis muat di satu halaman.
+  const D = DENSITY[density] ?? DENSITY[0];
+  const rp = ""; // padding baris lewat CSS variable --rp (lihat <style>)
+  const rowVars = {
+    "--rp": `${D.row + rowExtra / 2}px`,
+  } as React.CSSProperties;
   const hasCompanyContact = Boolean(company.phone || company.email);
+
+  const allRows: any[] = isSJ ? sjRows : items;
+  const visibleRows: any[] = paged
+    ? allRows.slice(rowStart, rowEnd ?? allRows.length)
+    : allRows;
 
   // Mode ketuk-untuk-edit (HP). Tiap bagian dibungkus area yang bisa diketuk
   // dan diberi outline tipis. Di mode lain props-nya cuma className biasa.
@@ -1091,10 +1306,28 @@ function InvoiceDocument({
       : { className: cls };
 
   return (
-    <div className="relative bg-white p-6 md:p-10 overflow-hidden w-[780px] export-page">
+    <div
+      data-pg="root"
+      className={`relative bg-white overflow-hidden w-[780px] export-page ${
+        paged ? "flex flex-col" : ""
+      }`}
+      style={paged ? { height: PAGE_H, padding: D.pad } : { padding: D.pad }}
+    >
+      {/* Watermark di tengah seluruh halaman; kop (latar putih) menutupinya
+          di area atas. Posisinya identik di setiap halaman. */}
+      <Watermark />
+
       {/* Kop dibungkus latar putih penuh (sampai tepi halaman) supaya
-          watermark tidak kelihatan di area kop; terpotong di garis merah. */}
-      <div className="relative z-10 bg-white -mx-6 md:-mx-10 -mt-6 md:-mt-10 px-6 md:px-10 pt-6 md:pt-10">
+          watermark tidak kelihatan di area kop; terpotong di garis merah.
+          Dirender di SETIAP halaman. */}
+      <div
+        data-pg="kop"
+        className="relative z-10 bg-white shrink-0"
+        style={{
+          margin: `-${D.pad}px -${D.pad}px 0`,
+          padding: `${D.pad}px ${D.pad}px 0`,
+        }}
+      >
         {/* ── HEADER: identitas di kiri, judul + nomor di kanan ── */}
         <div className="relative z-10 flex items-center justify-between gap-4 mb-4">
           <div className="flex items-center gap-3">
@@ -1138,362 +1371,386 @@ function InvoiceDocument({
         <div className="relative z-10 h-[2px] bg-brand" />
       </div>
 
-      <div className="h-6" />
+      <div className="shrink-0" style={{ height: D.gap }} />
 
-      {/* Body: watermark di tengah body (di bawah kop). minHeight menjamin
-          tinggi cukup supaya watermark utuh, tidak terpotong, walau isi
-          dokumen pendek (misal surat jalan 1 barang). */}
-      <div className="relative" style={{ minHeight: 360 }}>
-        <Watermark />
-
-        {/* Billing/shipping di kiri, meta dokumen di kanan */}
-        <div className="relative z-10 mb-8 flex items-start justify-between gap-6">
-          <div {...tp("customer", "flex-1 min-w-0")}>
-            <p className="text-xs uppercase tracking-widest text-ink/40 mb-1">
-              {isSJ ? "Kirim ke" : "Ditagihkan kepada"}
-            </p>
-            {isSJ && shippingAddress.sameAsCustomer ? (
-              <>
-                <Field
-                  editable={false}
-                  value={customerName}
-                  placeholder="Nama customer"
-                  showPlaceholder={tapMode}
-                  className="text-sm font-semibold"
-                />
-                <Field
-                  editable={false}
-                  value={customer.address}
-                  placeholder="Alamat"
-                  showPlaceholder={tapMode}
-                  className="text-xs text-ink/60 mt-1"
-                />
-                {customer.phone && (
-                  <p className="text-xs text-ink/60 mt-1">{customer.phone}</p>
-                )}
-              </>
-            ) : isSJ ? (
-              <>
-                <Field
-                  editable={editable}
-                  value={shippingAddress.name}
-                  onChange={(v: string) => updateShipTo({ name: v })}
-                  placeholder="Nama penerima / gudang / outlet"
-                  showPlaceholder={tapMode}
-                  className="text-sm font-semibold"
-                />
-                <Field
-                  editable={editable}
-                  value={shippingAddress.address}
-                  onChange={(v: string) => updateShipTo({ address: v })}
-                  placeholder="Alamat pengiriman"
-                  showPlaceholder={tapMode}
-                  multiline
-                  className="text-xs text-ink/60 mt-1"
-                />
-                <Field
-                  editable={editable}
-                  value={shippingAddress.phone}
-                  onChange={(v: string) => updateShipTo({ phone: v })}
-                  placeholder="No. HP penerima"
-                  showPlaceholder={tapMode}
-                  widthClass="w-40"
-                  className="text-xs text-ink/60 mt-1"
-                />
-              </>
-            ) : (
-              <>
-                <Field
-                  editable={editable}
-                  value={customerName}
-                  onChange={onCustomerNameChange}
-                  placeholder="Nama customer"
-                  showPlaceholder={tapMode}
-                  className="text-sm font-semibold"
-                />
-                <Field
-                  editable={editable}
-                  value={customer.address}
-                  onChange={(v: string) =>
-                    setCustomer((c: any) => ({ ...c, address: v }))
-                  }
-                  placeholder="Alamat"
-                  showPlaceholder={tapMode}
-                  multiline
-                  className="text-xs text-ink/60 mt-1"
-                />
-                {(editable || tapMode || customer.phone || customer.email) && (
-                  <div className="flex gap-3 mt-1">
-                    <Field
-                      editable={editable}
-                      value={customer.phone}
-                      onChange={(v: string) =>
-                        setCustomer((c: any) => ({ ...c, phone: v }))
-                      }
-                      placeholder="No. HP"
-                      showPlaceholder={tapMode}
-                      widthClass="w-32"
-                      className="text-xs text-ink/60"
-                    />
-                    <Field
-                      editable={editable}
-                      value={customer.email}
-                      onChange={(v: string) =>
-                        setCustomer((c: any) => ({ ...c, email: v }))
-                      }
-                      placeholder="Email"
-                      showPlaceholder={tapMode}
-                      widthClass="w-44"
-                      className="text-xs text-ink/60"
-                    />
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* Kolom meta kanan — min-w (bukan w tetap) supaya nomor referensi
-            panjang tetap satu baris; kolom alamat di kiri yang mengalah. */}
-          <div {...tp("info", "shrink-0 min-w-52 text-xs")}>
-            <div className="flex flex-col gap-1.5">
-              <div className="flex justify-between gap-3">
-                <span className="text-ink/40">
-                  {isSJ ? "Tgl. Kirim" : "Tanggal"}
-                </span>
-                <span className="text-ink/80 whitespace-nowrap">
-                  {documentDate}
-                </span>
-              </div>
-              {!isSJ && (
+      {/* Body. Di mode biasa minHeight menjamin tinggi cukup walau isi
+          dokumen pendek. Di mode paged, body mengisi sisa tinggi halaman. */}
+      <div
+        data-pg="body"
+        className={paged ? "relative flex-1 min-h-0" : "relative"}
+        style={paged ? undefined : { minHeight: 360 }}
+      >
+        {showMeta && (
+          /* Billing/shipping di kiri, meta dokumen di kanan */
+          <div
+            className="relative z-10 flex items-start justify-between gap-6"
+            style={{ marginBottom: D.meta }}
+          >
+            <div {...tp("customer", "flex-1 min-w-0")}>
+              <p className="text-xs uppercase tracking-widest text-ink/40 mb-1">
+                {isSJ ? "Kirim ke" : "Ditagihkan kepada"}
+              </p>
+              {isSJ && shippingAddress.sameAsCustomer ? (
                 <>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink/40">Termin</span>
-                    <span className="text-ink/80 whitespace-nowrap">
-                      {topLabel}
-                    </span>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink/40">Jatuh tempo</span>
-                    <span className="text-ink/80 whitespace-nowrap">
-                      {dueDate}
-                    </span>
-                  </div>
-                  {poNumber && (
-                    <div className="flex justify-between gap-3">
-                      <span className="text-ink/40 whitespace-nowrap">
-                        No. PO
-                      </span>
-                      <span className="font-data text-ink/80 text-right whitespace-nowrap">
-                        {poNumber}
-                      </span>
-                    </div>
+                  <Field
+                    editable={false}
+                    value={customerName}
+                    placeholder="Nama customer"
+                    showPlaceholder={tapMode}
+                    className="text-sm font-semibold"
+                  />
+                  <Field
+                    editable={false}
+                    value={customer.address}
+                    placeholder="Alamat"
+                    showPlaceholder={tapMode}
+                    className="text-xs text-ink/60 mt-1"
+                  />
+                  {customer.phone && (
+                    <p className="text-xs text-ink/60 mt-1">{customer.phone}</p>
                   )}
                 </>
-              )}
-              {isSJ && (
+              ) : isSJ ? (
                 <>
-                  <div className="flex justify-between gap-3">
-                    <span className="text-ink/40 whitespace-nowrap">
-                      Ref. Invoice
-                    </span>
-                    <span className="font-data text-ink/80 text-right whitespace-nowrap">
-                      {invoiceNumber}
-                    </span>
-                  </div>
-                  {/* No. PO milik invoice: tampil di SJ hanya kalau diisi. */}
-                  {poNumber && (
-                    <div className="flex justify-between gap-3">
-                      <span className="text-ink/40 whitespace-nowrap">
-                        No. PO
-                      </span>
-                      <span className="font-data text-ink/80 text-right whitespace-nowrap">
-                        {poNumber}
-                      </span>
+                  <Field
+                    editable={editable}
+                    value={shippingAddress.name}
+                    onChange={(v: string) => updateShipTo({ name: v })}
+                    placeholder="Nama penerima / gudang / outlet"
+                    showPlaceholder={tapMode}
+                    className="text-sm font-semibold"
+                  />
+                  <Field
+                    editable={editable}
+                    value={shippingAddress.address}
+                    onChange={(v: string) => updateShipTo({ address: v })}
+                    placeholder="Alamat pengiriman"
+                    showPlaceholder={tapMode}
+                    multiline
+                    className="text-xs text-ink/60 mt-1"
+                  />
+                  {shippingAddress.phone && (
+                    <Field
+                      editable={editable}
+                      value={shippingAddress.phone}
+                      onChange={(v: string) => updateShipTo({ phone: v })}
+                      widthClass="w-40"
+                      className="text-xs text-ink/60 mt-1"
+                    />
+                  )}
+                </>
+              ) : (
+                <>
+                  <Field
+                    editable={editable}
+                    value={customerName}
+                    onChange={onCustomerNameChange}
+                    placeholder="Nama customer"
+                    showPlaceholder={tapMode}
+                    className="text-sm font-semibold"
+                  />
+                  <Field
+                    editable={editable}
+                    value={customer.address}
+                    onChange={(v: string) =>
+                      setCustomer((c: any) => ({ ...c, address: v }))
+                    }
+                    placeholder="Alamat"
+                    showPlaceholder={tapMode}
+                    multiline
+                    className="text-xs text-ink/60 mt-1"
+                  />
+                  {(customer.phone || customer.email) && (
+                    <div className="flex gap-3 mt-1">
+                      <Field
+                        editable={editable}
+                        value={customer.phone}
+                        onChange={(v: string) =>
+                          setCustomer((c: any) => ({ ...c, phone: v }))
+                        }
+                        placeholder="No. HP"
+                        showPlaceholder={tapMode}
+                        widthClass="w-32"
+                        className="text-xs text-ink/60"
+                      />
+                      <Field
+                        editable={editable}
+                        value={customer.email}
+                        onChange={(v: string) =>
+                          setCustomer((c: any) => ({ ...c, email: v }))
+                        }
+                        placeholder="Email"
+                        showPlaceholder={tapMode}
+                        widthClass="w-44"
+                        className="text-xs text-ink/60"
+                      />
                     </div>
                   )}
-                  {/* Kode GR milik surat jalan: SELALU tampil. Kalau kosong,
-                    diberi garis titik-titik supaya bisa ditulis tangan.
-                    borderBottom inline (aman untuk html2canvas). */}
-                  <div className="flex justify-between items-end gap-3">
-                    <span className="text-ink/40 whitespace-nowrap">
-                      Kode GR
-                    </span>
-                    <span
-                      className="font-data text-ink/80 text-right whitespace-nowrap inline-block min-w-[110px] h-4"
-                      style={
-                        grCode
-                          ? undefined
-                          : { borderBottom: "1px dotted rgba(0,0,0,0.4)" }
-                      }
-                    >
-                      {grCode}
-                    </span>
-                  </div>
                 </>
               )}
             </div>
-          </div>
-        </div>
 
-        <div
-          {...tp(
-            isSJ ? "barang" : "item",
-            "relative z-10 overflow-x-auto mb-6",
-          )}
-        >
-          <table className="w-full text-sm min-w-[480px]">
-            <thead>
-              <tr className="border-b border-ink/20 text-left text-xs uppercase tracking-wide text-ink/40">
-                <th className="py-2">Produk</th>
-                <th className="py-2 text-right">
-                  {isSJ ? "Qty Dikirim" : "Qty"}
-                </th>
-                <th className="py-2 text-right">Satuan</th>
-                {!isSJ && <th className="py-2 text-right">Harga</th>}
-                {!isSJ && <th className="py-2 text-right">Subtotal</th>}
-                {editable && !isSJ && <th className="py-2 no-print" />}
-                {editable && isSJ && (
-                  <th className="py-2 text-right no-print">Kirim?</th>
+            {/* Kolom meta kanan — min-w (bukan w tetap) supaya nomor referensi
+            panjang tetap satu baris; kolom alamat di kiri yang mengalah. */}
+            <div {...tp("info", "shrink-0 min-w-52 text-xs")}>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex justify-between gap-3">
+                  <span className="text-ink/40">
+                    {isSJ ? "Tgl. Kirim" : "Tanggal"}
+                  </span>
+                  <span className="text-ink/80 whitespace-nowrap">
+                    {documentDate}
+                  </span>
+                </div>
+                {!isSJ && (
+                  <>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-ink/40">Termin</span>
+                      <span className="text-ink/80 whitespace-nowrap">
+                        {topLabel}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-ink/40">Jatuh tempo</span>
+                      <span className="text-ink/80 whitespace-nowrap">
+                        {dueDate}
+                      </span>
+                    </div>
+                    {poNumber && (
+                      <div className="flex justify-between gap-3">
+                        <span className="text-ink/40 whitespace-nowrap">
+                          No. PO
+                        </span>
+                        <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                          {poNumber}
+                        </span>
+                      </div>
+                    )}
+                  </>
                 )}
-              </tr>
-            </thead>
-            <tbody>
-              {isSJ
-                ? sjRows.map((it: any) => (
-                    <tr
-                      key={it.id}
-                      className={`border-b border-line ${!it.included ? "opacity-40" : ""}`}
-                    >
-                      <td className="py-2 pr-2">{it.name}</td>
-                      <td className="py-2 text-right">
-                        {editable ? (
-                          <input
-                            type="number"
-                            min={0}
-                            max={it.maxAllowed}
-                            value={it.shippedQty}
-                            onChange={(e) =>
-                              updateSjItem(it.id, {
-                                qty: Number(e.target.value),
-                              })
-                            }
-                            className="w-16 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none text-right"
-                          />
-                        ) : (
-                          <span>{it.shippedQty}</span>
-                        )}
-                        {it.shippedQty < it.qty && (
-                          <span className="block text-[10px] text-brand">
-                            dari {it.qty} {it.unit} (parsial)
-                          </span>
-                        )}
-                        {it.remainingAfterThis > 0 && (
-                          <span className="block text-[10px] text-ink/40">
-                            sisa {it.remainingAfterThis} {it.unit} belum dikirim
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-2 text-right">{it.unit}</td>
-                      {editable && (
-                        <td className="py-2 pl-1 no-print text-right">
-                          <label className="inline-flex items-center gap-1 text-[10px] text-ink/50">
+                {isSJ && (
+                  <>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-ink/40 whitespace-nowrap">
+                        Ref. Invoice
+                      </span>
+                      <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                        {invoiceNumber}
+                      </span>
+                    </div>
+                    {/* No. PO milik invoice: tampil di SJ hanya kalau diisi. */}
+                    {poNumber && (
+                      <div className="flex justify-between gap-3">
+                        <span className="text-ink/40 whitespace-nowrap">
+                          No. PO
+                        </span>
+                        <span className="font-data text-ink/80 text-right whitespace-nowrap">
+                          {poNumber}
+                        </span>
+                      </div>
+                    )}
+                    {/* Kode GR milik surat jalan: SELALU tampil. Kalau kosong,
+                    diberi garis titik-titik supaya bisa ditulis tangan.
+                    borderBottom inline (aman untuk html2canvas). */}
+                    <div className="flex justify-between items-end gap-3">
+                      <span className="text-ink/40 whitespace-nowrap">
+                        Kode GR
+                      </span>
+                      <span
+                        className="font-data text-ink/80 text-right whitespace-nowrap inline-block min-w-[110px] h-4"
+                        style={
+                          grCode
+                            ? undefined
+                            : { borderBottom: "1px dotted rgba(0,0,0,0.4)" }
+                        }
+                      >
+                        {grCode}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showTable && (
+          <div
+            data-pg="table"
+            {...tp(isSJ ? "barang" : "item", "relative z-10 overflow-x-auto")}
+            style={{
+              marginBottom:
+                D.tbl - (editable && !isSJ && showAddRow ? ADD_ROW_H : 0),
+            }}
+          >
+            <table className="w-full text-sm min-w-[480px]">
+              <thead data-pg="thead">
+                <tr className="border-b border-ink/20 text-left text-xs uppercase tracking-wide text-ink/40">
+                  <th className="py-2">Produk</th>
+                  <th className="py-2 text-right">
+                    {isSJ ? "Qty Dikirim" : "Qty"}
+                  </th>
+                  <th className="py-2 text-right">Satuan</th>
+                  {!isSJ && <th className="py-2 text-right">Harga</th>}
+                  {!isSJ && <th className="py-2 text-right">Subtotal</th>}
+                  {editable && !isSJ && <th className="py-2 no-print" />}
+                  {editable && isSJ && (
+                    <th className="py-2 text-right no-print">Kirim?</th>
+                  )}
+                </tr>
+              </thead>
+              <tbody style={rowVars}>
+                {isSJ
+                  ? visibleRows.map((it: any) => (
+                      <tr
+                        key={it.id}
+                        data-pg-row
+                        className={`border-b border-line ${!it.included ? "opacity-40" : ""}`}
+                      >
+                        <td className={`${rp} pr-2`}>{it.name}</td>
+                        <td className={`${rp} text-right`}>
+                          {editable ? (
                             <input
-                              type="checkbox"
-                              checked={it.included}
+                              type="number"
+                              min={0}
+                              max={it.maxAllowed}
+                              value={it.shippedQty}
                               onChange={(e) =>
                                 updateSjItem(it.id, {
-                                  included: e.target.checked,
+                                  qty: Number(e.target.value),
                                 })
                               }
+                              className="w-16 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none text-right"
                             />
-                            Kirim
-                          </label>
+                          ) : (
+                            <span>{it.shippedQty}</span>
+                          )}
+                          {it.shippedQty < it.qty && (
+                            <span className="block text-[10px] text-brand">
+                              dari {it.qty} {it.unit} (parsial)
+                            </span>
+                          )}
+                          {it.remainingAfterThis > 0 && (
+                            <span className="block text-[10px] text-ink/40">
+                              sisa {it.remainingAfterThis} {it.unit} belum
+                              dikirim
+                            </span>
+                          )}
                         </td>
-                      )}
-                    </tr>
-                  ))
-                : items.map((it: LineItem) => (
-                    <tr key={it.id} className="border-b border-line">
-                      <td className="py-2 pr-2">
-                        <ItemNameField
-                          editable={editable}
-                          value={it.name}
-                          onChange={(v: string) =>
-                            updateItem(it.id, { name: v })
-                          }
-                        />
-                      </td>
-                      <td className="py-2 text-right">
-                        <Field
-                          editable={editable}
-                          type="number"
-                          value={String(it.qty)}
-                          onChange={(v: string) =>
-                            updateItem(it.id, { qty: Number(v) })
-                          }
-                          widthClass="w-14"
-                          className="text-right"
-                        />
-                      </td>
-                      <td className="py-2 text-right">
-                        <UnitField
-                          editable={editable}
-                          value={it.unit}
-                          onChange={(v: string) =>
-                            updateItem(it.id, { unit: v })
-                          }
-                        />
-                      </td>
-                      <td className="py-2 text-right">
-                        {editable ? (
-                          <div className="flex items-center justify-end gap-1">
-                            <span className="text-ink/40 text-xs">Rp</span>
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={it.price ? formatNumber(it.price) : ""}
-                              onChange={(e) =>
-                                updateItem(it.id, {
-                                  price: parseNumberInput(e.target.value),
-                                })
-                              }
-                              placeholder="0"
-                              className="w-24 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors text-right"
-                            />
-                          </div>
-                        ) : (
-                          <span>Rp {formatNumber(it.price)}</span>
+                        <td className={`${rp} text-right`}>{it.unit}</td>
+                        {editable && (
+                          <td className={`${rp} pl-1 no-print text-right`}>
+                            <label className="inline-flex items-center gap-1 text-[10px] text-ink/50">
+                              <input
+                                type="checkbox"
+                                checked={it.included}
+                                onChange={(e) =>
+                                  updateSjItem(it.id, {
+                                    included: e.target.checked,
+                                  })
+                                }
+                              />
+                              Kirim
+                            </label>
+                          </td>
                         )}
-                      </td>
-                      <td className="py-2 text-right">
-                        {currency(it.qty * it.price)}
-                      </td>
-                      {editable && (
-                        <td className="py-2 pl-1 no-print">
-                          <button
-                            onClick={() => removeItem(it.id)}
-                            aria-label="Hapus baris"
-                          >
-                            <Trash2 className="w-3.5 h-3.5 text-ink/30 hover:text-brand" />
-                          </button>
+                      </tr>
+                    ))
+                  : visibleRows.map((it: LineItem) => (
+                      <tr
+                        key={it.id}
+                        data-pg-row
+                        className="border-b border-line"
+                      >
+                        <td className={`${rp} pr-2`}>
+                          <ItemNameField
+                            editable={editable}
+                            value={it.name}
+                            onChange={(v: string) =>
+                              updateItem(it.id, { name: v })
+                            }
+                          />
                         </td>
-                      )}
-                    </tr>
-                  ))}
-            </tbody>
-          </table>
-          {editable && !isSJ && (
-            <button
-              onClick={addItem}
-              className="no-print mt-2 flex items-center gap-1.5 text-xs text-ink/50 hover:text-ink"
-            >
-              <Plus className="w-3.5 h-3.5" /> Tambah baris
-            </button>
-          )}
-        </div>
+                        <td className={`${rp} text-right`}>
+                          <Field
+                            editable={editable}
+                            type="number"
+                            value={String(it.qty)}
+                            onChange={(v: string) =>
+                              updateItem(it.id, { qty: Number(v) })
+                            }
+                            widthClass="w-14"
+                            className="text-right"
+                          />
+                        </td>
+                        <td className={`${rp} text-right`}>
+                          <UnitField
+                            editable={editable}
+                            value={it.unit}
+                            onChange={(v: string) =>
+                              updateItem(it.id, { unit: v })
+                            }
+                          />
+                        </td>
+                        <td className={`${rp} text-right`}>
+                          {editable ? (
+                            <div className="flex items-center justify-end gap-1">
+                              <span className="text-ink/40 text-xs">Rp</span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={it.price ? formatNumber(it.price) : ""}
+                                onChange={(e) =>
+                                  updateItem(it.id, {
+                                    price: parseNumberInput(e.target.value),
+                                  })
+                                }
+                                placeholder="0"
+                                className="w-24 bg-transparent border-b border-transparent hover:border-ink/20 focus:border-ink outline-none transition-colors text-right"
+                              />
+                            </div>
+                          ) : (
+                            <span>Rp {formatNumber(it.price)}</span>
+                          )}
+                        </td>
+                        <td className={`${rp} text-right`}>
+                          {currency(it.qty * it.price)}
+                        </td>
+                        {editable && (
+                          <td className={`${rp} pl-1 no-print`}>
+                            <button
+                              onClick={() => removeItem(it.id)}
+                              aria-label="Hapus baris"
+                            >
+                              <Trash2 className="w-3.5 h-3.5 text-ink/30 hover:text-brand" />
+                            </button>
+                          </td>
+                        )}
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+            {editable && !isSJ && showAddRow && (
+              <button
+                data-pg="addrow"
+                onClick={addItem}
+                className="no-print mt-2 flex items-center gap-1.5 text-xs text-ink/50 hover:text-ink"
+                style={{ height: ADD_ROW_H - 8, lineHeight: "16px" }}
+              >
+                <Plus className="w-3.5 h-3.5" /> Tambah baris
+              </button>
+            )}
+          </div>
+        )}
 
-        {!isSJ && (
-          <div className="relative z-10 flex justify-end mb-10">
+        {/* Blok subtotal/total. Diukur terpisah (data-pg="total"). Spasi
+            bawah pakai padding (bukan margin) supaya ikut terukur. */}
+        {showTotal && !isSJ && (
+          <div
+            data-pg="total"
+            className="relative z-10 flex justify-end"
+            style={{ paddingBottom: D.tot }}
+          >
             <div {...tp("diskon", "w-64 flex flex-col gap-1.5 text-sm")}>
               <div className="flex justify-between">
                 <span className="text-ink/60">Subtotal</span>
@@ -1525,79 +1782,289 @@ function InvoiceDocument({
           </div>
         )}
 
-        {isSJ ? (
-          <div className="relative z-10 flex items-end justify-between gap-8 mt-10">
-            <div className="flex flex-col items-center gap-1 w-32">
-              <div className="relative w-full h-16">
-                {showSjStamp && (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <InvoiceStamp />
+        {/* Blok rekening + tanda tangan (invoice) / tanda tangan (SJ).
+            Diukur terpisah (data-pg="rest"); tidak pernah terbelah. */}
+        {showRest && (
+          <div data-pg="rest" className={`relative z-10 ${isSJ ? "pt-4" : ""}`}>
+            {isSJ ? (
+              <div className="flex items-end justify-between gap-8 mt-6">
+                <div className="flex flex-col items-center gap-1 w-32">
+                  <div className="relative w-full h-16">
+                    {showSjStamp && (
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <StampImage
+                          style={{
+                            width: 124,
+                            height: "auto",
+                            maxWidth: "none",
+                            opacity: 0.88,
+                            transform: "rotate(-5deg)",
+                          }}
+                        />
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-              <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-                Pengirim
-              </div>
-            </div>
-            <div className="flex flex-col items-center gap-1 w-32">
-              <div className="h-16" />
-              <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-                Penerima
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="relative z-10 flex items-end justify-between gap-8">
-            <div {...tp("rekening", "text-xs text-ink/60 max-w-[260px]")}>
-              <p className="font-semibold text-ink mb-1">Pembayaran ke:</p>
-              <p>{bank.bankName}</p>
-              <p>{bank.accountNumber}</p>
-              <p>a.n. {bank.accountHolder}</p>
-            </div>
-
-            <div {...tp("ttd", "flex items-end gap-3")}>
-              {/* Kotak materai opsional — tempat nempel materai manual. */}
-              {showMateraiBox && (
-                <div className="w-20 h-14 mb-8 border border-dashed border-ink/40 flex flex-col items-center justify-center text-center text-[9px] leading-tight text-ink/40">
-                  <span>Tempel</span>
-                  <span>Materai</span>
+                  <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
+                    Pengirim
+                  </div>
                 </div>
-              )}
+                <div className="flex flex-col items-center gap-1 w-32">
+                  <div className="h-16" />
+                  <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
+                    Penerima
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-end justify-between gap-8">
+                <div {...tp("rekening", "text-xs text-ink/60 max-w-[260px]")}>
+                  <p className="font-semibold text-ink mb-1">Pembayaran ke:</p>
+                  <p>{bank.bankName}</p>
+                  <p>{bank.accountNumber}</p>
+                  <p>a.n. {bank.accountHolder}</p>
+                </div>
 
-              {/* Blok tanda tangan: tanda tangan di lapisan bawah, cap di lapisan
-                atas dan menimpa tanda tangan. Cap bisa dimatikan lewat toggle
-                di tab TTD. Nama dan jabatan opsional. */}
-              <div className="flex flex-col items-center gap-1">
-                <p className="text-xs text-ink/60">Hormat kami,</p>
-                <div className="relative w-40 h-20">
-                  {signatureUrl && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={signatureUrl}
-                      alt="Tanda tangan"
-                      className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
-                    />
-                  )}
-                  {showStamp && (
-                    <div className="absolute left-2 bottom-1.5 z-10">
-                      <InvoiceStamp />
+                <div {...tp("ttd", "flex items-end gap-3")}>
+                  {/* Kotak materai opsional — tempat nempel materai manual. */}
+                  {showMateraiBox && (
+                    <div className="w-20 h-14 mb-8 border border-dashed border-ink/40 flex flex-col items-center justify-center text-center text-[9px] leading-tight text-ink/40">
+                      <span>Tempel</span>
+                      <span>Materai</span>
                     </div>
                   )}
-                </div>
-                <div className="w-40 border-t border-ink/30 pt-1 text-center">
-                  <p className="text-xs font-semibold text-ink/70">
-                    {signerName || "Makmur A3'S"}
-                  </p>
-                  {signerTitle && (
-                    <p className="text-[11px] text-ink/50">{signerTitle}</p>
-                  )}
+
+                  {/* Blok tanda tangan: tanda tangan di lapisan bawah, cap di lapisan
+                atas dan menimpa tanda tangan. Cap bisa dimatikan lewat toggle
+                di tab TTD. Nama dan jabatan opsional. */}
+                  <div className="flex flex-col items-center gap-1">
+                    <p className="text-xs text-ink/60">Hormat kami,</p>
+                    <div className="relative w-40 h-[72px]">
+                      {signatureUrl && (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={signatureUrl}
+                          alt="Tanda tangan"
+                          className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
+                        />
+                      )}
+                      {showStamp && (
+                        <div className="absolute left-0 bottom-1 z-10">
+                          <StampImage
+                            style={{
+                              width: 132,
+                              height: "auto",
+                              maxWidth: "none",
+                              opacity: 0.88,
+                              transform: "rotate(-5deg)",
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <div className="w-40 border-t border-ink/30 pt-1 text-center">
+                      <p className="text-xs font-semibold text-ink/70">
+                        {signerName || "Makmur A3'S"}
+                      </p>
+                      {signerTitle && (
+                        <p className="text-[11px] text-ink/50">{signerTitle}</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Nomor halaman — hanya kalau dokumen lebih dari satu halaman. Ada di
+          area padding bawah halaman. */}
+      {paged && pageCount > 1 && (
+        <div
+          className="absolute left-0 right-0 z-10 text-center text-[10px] text-ink/40 font-data"
+          style={{ bottom: 8 }}
+        >
+          Halaman {pageNo} dari {pageCount}
+        </div>
+      )}
     </div>
+  );
+}
+
+// Dokumen berhalaman: mengukur DOM dokumen utuh (di portal tersembunyi),
+// menghitung pembagian halaman, lalu merender tiap halaman sebagai kotak A4
+// tetap. Dipakai untuk canvas editor, preview, PDF, print, dan share.
+function PagedDocument({
+  pageClassName = "",
+  pageGap = 0,
+  onPageCount,
+  ...props
+}: any) {
+  const isSJ = props.docType === "suratJalan";
+  const rowCount: number = isSJ ? props.sjRows.length : props.items.length;
+  const r0 = useRef<HTMLDivElement>(null);
+  const r1 = useRef<HTMLDivElement>(null);
+  const r2 = useRef<HTMLDivElement>(null);
+  const measureRefs = [r0, r1, r2];
+  const sigRef = useRef("");
+  const [layout, setLayout] = useState<{
+    slices: PageSlice[];
+    density: number;
+  } | null>(null);
+  const slices = layout?.slices ?? null;
+  const density = layout?.density ?? 0;
+
+  // Hitung pembagian halaman dari satu salinan dokumen yang diukur.
+  const calc = (host: HTMLDivElement | null): PageSlice[] | null => {
+    const root = host?.querySelector<HTMLElement>('[data-pg="root"]');
+    if (!root) return null;
+    const q = (k: string) =>
+      root.querySelector<HTMLElement>(`[data-pg="${k}"]`);
+    const body = q("body");
+    const tableWrap = q("table");
+    const thead = q("thead");
+    const totalEl = q("total");
+    const restEl = q("rest");
+    const addEl = q("addrow");
+    const table = tableWrap?.querySelector<HTMLElement>("table");
+    if (!body || !tableWrap || !thead || !table) return null;
+
+    // offsetHeight / offsetTop dipakai (bukan getBoundingClientRect) supaya
+    // tidak terpengaruh transform: scale() di pembungkus preview.
+    const bodyTop = body.offsetTop; // kop + spacer
+    if (bodyTop === 0) return null; // sedang disembunyikan (misal saat print)
+
+    const padBottom = parseFloat(getComputedStyle(root).paddingBottom) || 0;
+    const tblMb = parseFloat(getComputedStyle(tableWrap).marginBottom) || 0;
+    // Jarak dari atas body ke atas tabel = tinggi blok customer/meta + margin.
+    const metaH = tableWrap.offsetTop;
+    const theadH = thead.offsetHeight;
+    const rows = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-pg-row]"),
+    );
+    const tops = rows.map((r) => r.offsetTop);
+    const h = tops.map(
+      (t, i) => (i < tops.length - 1 ? tops[i + 1] : table.offsetHeight) - t,
+    );
+    // Blok total (invoice saja) dan blok rekening/TTD diukur terpisah.
+    const totalH = totalEl ? totalEl.offsetHeight : 0;
+    const restH = restEl ? restEl.offsetHeight : 0;
+    // Tombol "Tambah baris" (editor saja) + margin atasnya (mt-2 = 8px).
+    const addH = addEl ? addEl.offsetHeight + 8 : 0;
+
+    // Area di bawah kop + spacer sampai dasar halaman.
+    const usable = PAGE_H - bodyTop - padBottom - PAGE_SAFE;
+    const cap1 = Math.max(usable - metaH - theadH - tblMb, 40);
+    // Halaman lanjutan tidak punya judul tambahan: tabel langsung di bawah kop.
+    const capC = Math.max(usable - theadH - tblMb, 40);
+
+    return stretchPages(
+      computePageSlices(h, cap1, capC, totalH, restH, addH),
+      h,
+      cap1,
+      capC,
+      totalH,
+    );
+  };
+
+  const measure = () => {
+    const results = measureRefs.map((r) => calc(r.current));
+    if (!results[0]) return;
+    // Pilih level paling longgar dengan jumlah halaman paling sedikit.
+    const counts = results.map((r) => (r ? r.length : Infinity));
+    const d = counts.indexOf(Math.min(...counts));
+    const chosen = results[d]!;
+    const sig = JSON.stringify({ chosen, d });
+    if (sig !== sigRef.current) {
+      sigRef.current = sig;
+      setLayout({ slices: chosen, density: d });
+    }
+  };
+  const measureLatest = useRef(measure);
+  measureLatest.current = measure;
+
+  // Ukur ulang setiap render (murah), hanya set state kalau hasilnya berubah.
+  useLayoutEffect(() => {
+    measureLatest.current();
+  });
+
+  // Ukur ulang kalau tinggi dokumen berubah sendiri (logo / font selesai load).
+  useEffect(() => {
+    const run = () => measureLatest.current();
+    const ro = new ResizeObserver(run);
+    measureRefs.forEach((r) => r.current && ro.observe(r.current));
+    (document as any).fonts?.ready?.then(run);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pages: PageSlice[] = slices ?? [
+    { start: 0, end: rowCount, total: true, rest: true },
+  ];
+
+  useEffect(() => {
+    onPageCount?.(pages.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages.length]);
+
+  return (
+    <>
+      {typeof document !== "undefined" &&
+        [0, 1, 2].map((d) =>
+          createPortal(
+            <div
+              ref={measureRefs[d]}
+              data-measure
+              aria-hidden
+              style={{
+                position: "fixed",
+                top: 0,
+                left: -10000,
+                width: PAGE_W,
+                visibility: "hidden",
+                pointerEvents: "none",
+                zIndex: -1,
+              }}
+            >
+              <InvoiceDocument
+                {...props}
+                editable={false}
+                onEdit={undefined}
+                density={d}
+              />
+            </div>,
+            document.body,
+            `measure-${d}`,
+          ),
+        )}
+      <div>
+        {pages.map((s, i) => (
+          <div
+            key={i}
+            data-export-page
+            data-page-index={i}
+            className={pageClassName}
+            style={i < pages.length - 1 ? { marginBottom: pageGap } : undefined}
+          >
+            <InvoiceDocument
+              {...props}
+              paged
+              density={density}
+              rowExtra={s.pad ?? 0}
+              pageNo={i + 1}
+              pageCount={pages.length}
+              showMeta={i === 0}
+              showTotal={s.total}
+              showRest={s.rest}
+              showTable={s.end > s.start || s.start === 0}
+              showAddRow={s.end === rowCount}
+              rowStart={s.start}
+              rowEnd={s.end}
+            />
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -1633,6 +2100,9 @@ export default function InvoiceGenerator() {
   const mobilePageRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState<"pdf" | "share" | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+
+  // Jumlah halaman hasil paginasi per dokumen export (key = ExportDoc.key).
+  const [pageCounts, setPageCounts] = useState<Record<string, number>>({});
 
   // Portal area export tidak boleh dirender saat SSR.
   const [mounted, setMounted] = useState(false);
@@ -1974,7 +2444,8 @@ export default function InvoiceGenerator() {
       : (TOP_OPTIONS.find((t) => t.days === topDays)?.label ??
         `${topDays} Hari`);
 
-  // Auto-fit canvas desktop.
+  // Auto-fit canvas desktop. Canvas sekarang berisi halaman A4 bertumpuk,
+  // jadi "fit" memakai tinggi SATU halaman (PAGE_H), bukan seluruh tumpukan.
   useEffect(() => {
     if (!showDesktop || !autoFit) return;
     const recompute = () => {
@@ -1983,11 +2454,7 @@ export default function InvoiceGenerator() {
       if (!wrap || !page) return;
       const availW = wrap.clientWidth - 48;
       const availH = wrap.clientHeight - 48;
-      const scale = Math.min(
-        availW / page.scrollWidth,
-        availH / page.scrollHeight,
-        1,
-      );
+      const scale = Math.min(availW / page.scrollWidth, availH / PAGE_H, 1);
       setZoom(scale > 0.1 ? scale : 0.5);
     };
     recompute();
@@ -1999,7 +2466,7 @@ export default function InvoiceGenerator() {
       ro.disconnect();
       window.removeEventListener("resize", recompute);
     };
-  }, [showDesktop, autoFit, items.length, docType, panelCollapsed]);
+  }, [showDesktop, autoFit, docType, panelCollapsed]);
 
   // Layar utama HP: dokumen selalu pas selebar layar.
   useEffect(() => {
@@ -2029,10 +2496,12 @@ export default function InvoiceGenerator() {
       const pad = narrow ? 24 : 64;
       const availW = wrap.clientWidth - pad;
       const availH = wrap.clientHeight - pad;
+      // Preview bisa berisi beberapa halaman bertumpuk, jadi tinggi yang
+      // dipakai untuk "fit" adalah SATU halaman (PAGE_H), bukan seluruh tumpukan.
       // Di HP/tablet portrait: fit ke lebar saja biar teks gak terlalu kecil.
       const scale = narrow
         ? Math.min(availW / page.scrollWidth, 1.4)
-        : Math.min(availW / page.scrollWidth, availH / page.scrollHeight, 1.4);
+        : Math.min(availW / page.scrollWidth, availH / PAGE_H, 1.4);
       setPreviewZoom(scale > 0.1 ? scale : 0.5);
     };
     recompute();
@@ -2403,13 +2872,15 @@ export default function InvoiceGenerator() {
   };
 
   // Print: area export dirender lewat portal langsung di <body>, dan CSS
-  // print menyembunyikan semua anak body lain. Jadi 1 dokumen maupun
-  // bundling sama-sama satu print job (satu PDF, halaman terpisah).
+  // print menyembunyikan semua anak body lain. Tiap halaman hasil paginasi
+  // ([data-export-page]) dipisah dengan page break, jadi 1 dokumen maupun
+  // bundling sama-sama satu print job.
   const handlePrint = () => window.print();
 
-  // Tambahkan satu elemen dokumen ke PDF A4 (halaman baru kalau bukan yang
-  // pertama). Paginasi untuk dokumen panjang sama seperti sebelumnya.
-  const addElementToPdf = async (
+  // Tambahkan SATU halaman (kotak A4 hasil paginasi) ke PDF. Karena halaman
+  // sudah dipotong rapi oleh paginasi, tidak ada lagi pemotongan gambar di
+  // tengah baris / tanda tangan seperti sebelumnya.
+  const addPageToPdf = async (
     pdf: import("jspdf").jsPDF,
     el: HTMLElement,
     isFirst: boolean,
@@ -2424,27 +2895,34 @@ export default function InvoiceGenerator() {
     const imgData = canvas.toDataURL("image/png");
     const pageWidth = 210;
     const pageHeight = 297;
-    const imgHeight = (canvas.height * pageWidth) / canvas.width;
-
-    if (!isFirst) pdf.addPage();
-    let heightLeft = imgHeight;
-    let position = 0;
-    pdf.addImage(imgData, "PNG", 0, position, pageWidth, imgHeight);
-    heightLeft -= pageHeight;
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, "PNG", 0, position, pageWidth, imgHeight);
-      heightLeft -= pageHeight;
+    let w = pageWidth;
+    let imgHeight = (canvas.height * w) / canvas.width;
+    if (imgHeight > pageHeight) {
+      imgHeight = pageHeight;
+      w = (canvas.width * imgHeight) / canvas.height;
     }
+    if (!isFirst) pdf.addPage();
+    pdf.addImage(imgData, "PNG", (pageWidth - w) / 2, 0, w, imgHeight);
   };
 
+  const pagesOf = (el: HTMLElement) =>
+    Array.from(el.querySelectorAll<HTMLElement>("[data-export-page]"));
+
   // Semua dokumen di exportDocs -> daftar PDF. Kalau mergeActive: satu PDF
-  // gabungan. Kalau tidak: satu PDF per dokumen. Diproses berurutan supaya
-  // memori html2canvas tidak numpuk.
+  // gabungan. Kalau tidak: satu PDF per dokumen. Tiap dokumen bisa terdiri
+  // dari beberapa halaman. Diproses berurutan supaya memori html2canvas
+  // tidak numpuk.
   const buildPdfDocuments = async (): Promise<BuiltPdf[]> => {
     const root = exportRef.current;
     if (!root) return [];
+    // Pastikan cap sudah diproses dan font sudah siap sebelum ditangkap.
+    await loadStamp();
+    await nextFrames();
+    try {
+      await (document as any).fonts?.ready;
+    } catch {
+      // abaikan
+    }
     await nextFrames();
     const { jsPDF } = await import("jspdf");
 
@@ -2459,8 +2937,12 @@ export default function InvoiceGenerator() {
 
     if (mergeActive) {
       const pdf = new jsPDF("p", "mm", "a4");
-      for (let i = 0; i < targets.length; i++) {
-        await addElementToPdf(pdf, targets[i].el, i === 0);
+      let first = true;
+      for (const t of targets) {
+        for (const page of pagesOf(t.el)) {
+          await addPageToPdf(pdf, page, first);
+          first = false;
+        }
       }
       return [{ fileName: `${invoiceNumber}-SJ.pdf`, pdf }];
     }
@@ -2468,7 +2950,11 @@ export default function InvoiceGenerator() {
     const built: BuiltPdf[] = [];
     for (const { d, el } of targets) {
       const pdf = new jsPDF("p", "mm", "a4");
-      await addElementToPdf(pdf, el, true);
+      let first = true;
+      for (const page of pagesOf(el)) {
+        await addPageToPdf(pdf, page, first);
+        first = false;
+      }
       built.push({ fileName: d.fileName, pdf });
     }
     return built;
@@ -2671,21 +3157,29 @@ export default function InvoiceGenerator() {
     return activeShipment ? [makeSjDoc(activeShipment)] : [];
   })();
 
-  // Jumlah dokumen vs jumlah file hasil export (1 kalau digabung).
+  // Jumlah dokumen vs jumlah file hasil export (1 kalau digabung). Satu
+  // dokumen bisa lebih dari 1 halaman, jadi total halaman dihitung terpisah
+  // dari hasil paginasi (default 1 sebelum selesai diukur).
   const docCount = exportDocs.length;
   const mergeActive = mergePdf && docCount > 1;
   const fileCount = mergeActive ? 1 : docCount;
+  const totalPages = exportDocs.reduce(
+    (sum, d) => sum + (pageCounts[d.key] ?? 1),
+    0,
+  );
 
-  // Label tombol dinamis — polos kalau cuma 1 file/dokumen.
+  // Label tombol dinamis — polos kalau cuma 1 file dan 1 halaman.
   // Digabung -> 1 file berisi N halaman ("pages"); tidak digabung -> N file.
   const countSuffix = mergeActive
-    ? ` (${docCount} pages)`
+    ? ` (${totalPages} pages)`
     : fileCount > 1
       ? ` (${fileCount} files)`
-      : "";
+      : totalPages > 1
+        ? ` (${totalPages} pages)`
+        : "";
   const shareLabel = `Share${countSuffix}`;
   const pdfLabel = `PDF${countSuffix}`;
-  const printLabel = docCount > 1 ? `Print (${docCount} pages)` : "Print";
+  const printLabel = totalPages > 1 ? `Print (${totalPages} pages)` : "Print";
 
   // Daftar alamat dari SJ lain yang bisa disalin (tanpa duplikat). Muncul
   // sebagai dropdown "Salin dari SJ lain" di tab Kirim Ke.
@@ -3759,20 +4253,46 @@ export default function InvoiceGenerator() {
   return (
     <div className="print-root fixed inset-0 z-[100] bg-neutral-100 flex flex-col overflow-hidden">
       <style>{`
+        /* Padding baris item diatur lewat variable --rp (kepadatan + stretch). */
+        [data-pg-row] > td {
+          padding-top: var(--rp, 8px);
+          padding-bottom: var(--rp, 8px);
+          line-height: 20px;
+        }
+        /* Input di editor dipaksa setinggi teks statis (20px) supaya tinggi
+           baris di editor sama persis dengan di PDF / print. */
+        [data-pg-row] input:not([type="checkbox"]) {
+          height: 20px;
+          line-height: 20px;
+          padding-top: 0;
+          padding-bottom: 0;
+          vertical-align: top;
+        }
+        [data-pg-row] > td > span,
+        [data-pg-row] > td > label {
+          vertical-align: top;
+        }
+        [data-pg-row] button {
+          display: block;
+        }
+
         /* Area export disembunyikan di luar layar saat mode normal. */
         #print-portal { position: fixed; top: 0; left: -10000px; z-index: -1; }
 
         @media print {
-          @page { size: A4; margin: 10mm; }
+          /* Margin 0: halaman dokumen sudah punya padding sendiri, dan
+             ukurannya (780 x 1100px = 206 x 291mm) pas di dalam A4. */
+          @page { size: A4; margin: 0; }
           html, body {
             margin: 0;
             height: auto !important;
             overflow: visible !important;
           }
 
-          /* Sembunyikan semua anak body kecuali portal export. Portal ada
-             langsung di <body>, jadi tidak ada ancestor (fixed / overflow
-             hidden) yang bisa memotong kontennya. */
+          /* Sembunyikan semua anak body kecuali portal export (termasuk
+             portal pengukur paginasi). Portal ada langsung di <body>, jadi
+             tidak ada ancestor (fixed / overflow hidden) yang bisa
+             memotong kontennya. */
           body > *:not(#print-portal) { display: none !important; }
           #print-portal {
             display: block !important;
@@ -3781,13 +4301,21 @@ export default function InvoiceGenerator() {
             z-index: auto !important;
           }
 
-          #invoice-export-area .export-page { width: 100% !important; }
+          /* Tiap halaman hasil paginasi = satu lembar A4, ukuran tetap. */
+          #invoice-export-area [data-export-page] {
+            width: ${PAGE_W}px;
+            margin: 0 auto;
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
           #invoice-export-area .overflow-x-auto { overflow: visible !important; }
 
-          /* Tiap dokumen (kecuali yang terakhir) diikuti halaman baru. */
-          #invoice-export-area [data-export-doc]:not(:last-child) {
-            break-after: page;
-            page-break-after: always;
+          /* Halaman baru untuk tiap halaman, kecuali halaman paling pertama
+             dari dokumen paling pertama. */
+          #invoice-export-area [data-export-page]:not([data-page-index="0"]),
+          #invoice-export-area [data-export-doc] + [data-export-doc] [data-export-page][data-page-index="0"] {
+            break-before: page;
+            page-break-before: always;
           }
 
           /* Pertahankan warna (garis brand, cap) saat print. */
@@ -3983,7 +4511,7 @@ export default function InvoiceGenerator() {
           </div>
         )}
 
-        {/* ── CANVAS (zoomable, desktop) ───────────────────────────── */}
+        {/* ── CANVAS (zoomable, desktop) — halaman A4 bertumpuk ────── */}
         {showDesktop && (
           <div
             ref={canvasWrapRef}
@@ -4003,11 +4531,13 @@ export default function InvoiceGenerator() {
                   width: "max-content",
                 }}
               >
-                <div
-                  ref={pageRef}
-                  className="rounded-2xl border border-line shadow-sm overflow-hidden"
-                >
-                  <InvoiceDocument editable {...docProps} />
+                <div ref={pageRef}>
+                  <PagedDocument
+                    editable
+                    {...docProps}
+                    pageClassName="rounded-2xl border border-line shadow-sm overflow-hidden"
+                    pageGap={24}
+                  />
                 </div>
               </div>
             </div>
@@ -4034,14 +4564,13 @@ export default function InvoiceGenerator() {
                   width: "max-content",
                 }}
               >
-                <div
-                  ref={mobilePageRef}
-                  className="rounded-2xl border border-line shadow-sm overflow-hidden"
-                >
-                  <InvoiceDocument
+                <div ref={mobilePageRef}>
+                  <PagedDocument
                     editable={false}
                     {...docProps}
                     onEdit={openSheet}
+                    pageClassName="rounded-2xl border border-line shadow-sm overflow-hidden"
+                    pageGap={16}
                   />
                 </div>
               </div>
@@ -4297,11 +4826,13 @@ export default function InvoiceGenerator() {
                   width: "max-content",
                 }}
               >
-                <div
-                  ref={previewPageRef}
-                  className="rounded-2xl shadow-2xl overflow-hidden"
-                >
-                  <InvoiceDocument editable={false} {...docProps} />
+                {/* Preview = persis hasil PDF/print: halaman A4 bertumpuk. */}
+                <div ref={previewPageRef}>
+                  <PagedDocument
+                    {...docProps}
+                    pageClassName="rounded-2xl shadow-2xl overflow-hidden"
+                    pageGap={24}
+                  />
                 </div>
               </div>
             </div>
@@ -4312,15 +4843,23 @@ export default function InvoiceGenerator() {
       {/* Versi statis tersembunyi — dipakai KHUSUS buat print & PDF. Dirender
           lewat portal langsung ke <body> supaya tidak terpotong ancestor
           (fixed/overflow-hidden) saat print. Tiap dokumen punya wrapper
-          sendiri ([data-export-doc]) supaya bisa di-capture satu per satu
-          dan dipisah halaman saat print. */}
+          sendiri ([data-export-doc]) dan di dalamnya satu atau lebih halaman
+          A4 ([data-export-page]) hasil paginasi, supaya bisa di-capture per
+          halaman dan dipisah halaman saat print. */}
       {mounted &&
         createPortal(
           <div id="print-portal" aria-hidden>
             <div id="invoice-export-area" ref={exportRef}>
               {exportDocs.map((d) => (
                 <div key={d.key} data-export-doc data-export-key={d.key}>
-                  <InvoiceDocument editable={false} {...d.props} />
+                  <PagedDocument
+                    {...d.props}
+                    onPageCount={(n: number) =>
+                      setPageCounts((prev) =>
+                        prev[d.key] === n ? prev : { ...prev, [d.key]: n },
+                      )
+                    }
+                  />
                 </div>
               ))}
             </div>
