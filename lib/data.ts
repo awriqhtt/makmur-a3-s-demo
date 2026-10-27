@@ -1433,11 +1433,11 @@ const LAYOUT: Layout[] = [
     name: "Cups, Lids & Beverage Packaging",
     icon: Coffee,
     blurb:
-      "Thinwall, cup saus, bowl, gelas minuman, botol, dan pelengkap minuman untuk cafe dan brand minuman.",
+      "Cup saus, bowl, gelas minuman, botol, dan pelengkap minuman untuk cafe dan brand minuman.",
     categories: [
       {
         id: "cb-thinwall",
-        name: "Thinwall, Cup Saus & Bowl",
+        name: "Cup Saus & Bowl",
         codes: [
           "CB-035",
           "CB-100",
