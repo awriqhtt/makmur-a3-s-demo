@@ -1,5 +1,8 @@
 "use client";
 
+// app/quotation-list/page.tsx  (REVISI)
+// Perubahan: produk dicari lewat getCatalogProduct (mendukung varian baru),
+// dan gambar item memakai gambar grup kalau varian belum punya foto sendiri.
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -13,7 +16,8 @@ import {
 import SectionHeading from "@/components/ui/SectionHeading";
 import Button from "@/components/ui/Button";
 import { useCart } from "@/lib/cart-context";
-import { hasProductImage, getProductBySlug, getMoq } from "@/lib/data";
+import { getProductImagePath, getMoq } from "@/lib/data";
+import { getCatalogProduct, getDisplayImageCode } from "@/lib/variants";
 
 const WHATSAPP_NUMBER = "6287878311243";
 
@@ -58,8 +62,9 @@ export default function QuotationListPage() {
         <div className="mt-12">
           <div className="flex flex-col gap-3">
             {items.map((item) => {
-              const available = hasProductImage(item.code);
-              const product = getProductBySlug(item.code);
+              const imgCode = getDisplayImageCode(item.code);
+              const imgSrc = imgCode ? getProductImagePath(imgCode) : null;
+              const product = getCatalogProduct(item.code);
               // null kalau MOQ_ENABLED = false (lihat lib/data.ts), jadi
               // badge "Di bawah MOQ" otomatis tidak muncul.
               const moq = product ? getMoq(product) : null;
@@ -71,9 +76,9 @@ export default function QuotationListPage() {
                   className="flex items-center gap-3 sm:gap-4 border border-line rounded-2xl p-4"
                 >
                   <div className="relative w-14 h-14 sm:w-16 sm:h-16 rounded-xl bg-sand border border-line overflow-hidden shrink-0 flex items-center justify-center">
-                    {available ? (
+                    {imgSrc ? (
                       <Image
-                        src={`/products/${item.code}.png`}
+                        src={imgSrc}
                         alt={item.name}
                         fill
                         sizes="64px"

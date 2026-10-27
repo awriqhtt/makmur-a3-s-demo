@@ -15,11 +15,12 @@ import {
   LayoutGrid,
 } from "lucide-react";
 import Logomark from "./Logomark";
-import { DIVISIONS, ALL_PRODUCTS } from "@/lib/data";
+import { DIVISIONS } from "@/lib/data";
+import { CATALOG_PRODUCTS, groupCatalog } from "@/lib/variants";
 import { useCart } from "@/lib/cart-context";
 
 // "Produk" is handled separately below as an expandable accordion (it shows
-// the 8 divisi inline), so it's marked with a special href instead of living
+// the 8 kategori inline), so it's marked with a special href instead of living
 // in this flat list. "Kerja Sama" isn't in this list at all — it renders as
 // its own sticky CTA button at the bottom of the drawer instead of a plain
 // row, since it's the highest-priority action. Anchor items (href
@@ -52,23 +53,37 @@ function isNavActive(href: string, pathname: string) {
   return pathname === href;
 }
 
-// Matches on product name, SKU code, and category name (the specific
-// sub-kategori, e.g. "Cup + Lid") so "cup", "CB-400", and "beverage" all
-// find relevant results — not just an exact name match.
-function getProductSuggestions(query: string) {
+type ProductSuggestion = { key: string; label: string; sub: string };
+
+// Matches on product name, SKU code, and subkategori name so "cup",
+// "CB-400", and "gelas" all find relevant results. Searches the full catalog
+// (CATALOG_PRODUCTS, including generated variants) and collapses variants of
+// the same group into ONE suggestion, same as the catalog cards. The label is
+// the group name, which is a prefix of every variant name, so the search on
+// /products?q=... always finds the card.
+function getProductSuggestions(query: string): ProductSuggestion[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
-  return ALL_PRODUCTS.filter(
+  const matched = CATALOG_PRODUCTS.filter(
     (p) =>
       p.name.toLowerCase().includes(q) ||
       p.code.toLowerCase().includes(q) ||
       p.categoryName.toLowerCase().includes(q),
-  ).slice(0, MAX_PRODUCT_SUGGESTIONS);
+  );
+  return groupCatalog(matched)
+    .slice(0, MAX_PRODUCT_SUGGESTIONS)
+    .map(({ product, group }) => ({
+      key: group?.id ?? product.code,
+      label: group?.name ?? product.name,
+      sub: group
+        ? product.categoryName
+        : `${product.code} · ${product.categoryName}`,
+    }));
 }
 
-// Separate match against DIVISION names — shown above the product matches
-// so typing "cup" surfaces the whole "Cups, Lids & Beverage Packaging"
-// division as a one-click filter, not just individual SKUs inside it.
+// Separate match against KATEGORI (division) names — shown above the product
+// matches so typing "cup" surfaces the whole "Cups, Lids & Beverage Packaging"
+// kategori as a one-click filter, not just individual SKUs inside it.
 function getDivisionSuggestions(query: string) {
   const q = query.trim().toLowerCase();
   if (!q) return [];
@@ -137,20 +152,20 @@ function SearchSuggestions({
           </div>
           {products.map((p) => (
             <button
-              key={p.code}
+              key={p.key}
               type="button"
               onMouseDown={(e) => {
                 e.preventDefault();
-                onSelectProduct(p.name);
+                onSelectProduct(p.label);
               }}
               className="w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left hover:bg-sand transition-colors"
             >
               <span className="min-w-0">
                 <span className="block text-sm font-medium text-ink truncate">
-                  {p.name}
+                  {p.label}
                 </span>
                 <span className="block text-xs text-ink/45 font-data truncate">
-                  {p.code} · {p.categoryName}
+                  {p.sub}
                 </span>
               </span>
               <Search className="w-3.5 h-3.5 text-ink/30 shrink-0" />
@@ -167,13 +182,18 @@ export default function Header() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const isOnProducts = pathname === "/products";
-  const activeDivisi = isOnProducts ? searchParams.get("divisi") : null;
+  // Only accept a divisi id that still exists. Old bookmarks/links (e.g.
+  // ?divisi=foil) then count as "All Products" instead of highlighting nothing.
+  const divisiParam = isOnProducts ? searchParams.get("divisi") : null;
+  const activeDivisi = DIVISIONS.some((d) => d.id === divisiParam)
+    ? divisiParam
+    : null;
   const isAllActive = isOnProducts && !activeDivisi;
   // Halaman Bantuan pakai chat widget full-width sendiri yang jadi
   // sticky-nya sendiri (lihat app/bantuan/page.tsx) — header situs sengaja
   // gak sticky di sini biar begitu discroll, dia geser naik ilang dan
   // digantikan chat widget yang "ambil alih" penuh layar. Baris quick-nav
-  // divisi juga gak relevan di halaman ini jadi tetap disembunyiin.
+  // kategori juga gak relevan di halaman ini jadi tetap disembunyiin.
   const hideDivisiBar = pathname === "/bantuan";
   const { count: cartCount } = useCart();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -413,12 +433,12 @@ export default function Header() {
           </form>
         )}
 
-        {/* Divisi quick-nav — visible on every page including /products,
+        {/* Kategori quick-nav — visible on every page including /products,
             and always reachable since <header> (this whole block) is
-            sticky and never hides. This is now the ONE sticky control for
-            divisi selection; the sidebar in ProductsClient shows Kategori
-            (one level down, scoped to the active divisi) instead of
-            duplicating this same divisi list.
+            sticky and never hides. This is the ONE sticky control for
+            kategori selection; the sidebar in ProductsClient shows
+            Subkategori (one level down, scoped to the active kategori)
+            instead of duplicating this same list.
             EXCEPTION: hidden on /bantuan — see hideDivisiBar above. */}
         {!hideDivisiBar && (
           <div
@@ -503,7 +523,7 @@ export default function Header() {
 
               {NAV_ITEMS.map((item) => {
                 // "Produk" is a special accordion entry, not a plain link —
-                // it expands in place to show the 8 divisi inline instead of
+                // it expands in place to show the 8 kategori inline instead of
                 // navigating away and duplicating that list further down.
                 if (item.href === "__produk__") {
                   return (

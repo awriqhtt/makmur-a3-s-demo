@@ -34,7 +34,7 @@ export default function ProductImage({
 
   if (!available || !imageUrl) {
     return (
-      <div className="bg-sand min-h-[280px] relative overflow-hidden flex items-center justify-center">
+      <div className="bg-sand h-full w-full relative overflow-hidden flex items-center justify-center">
         <Layers className="w-20 h-20 text-ink/10" strokeWidth={1} />
         <span className="absolute bottom-4 left-4 right-4 h-1.5 tag-stripe opacity-30" />
       </div>
@@ -44,7 +44,7 @@ export default function ProductImage({
   return (
     <div
       ref={containerRef}
-      className="relative min-h-[280px] overflow-hidden group/zoom"
+      className="relative h-full w-full overflow-hidden group/zoom"
       onMouseEnter={() => setZooming(true)}
       onMouseLeave={() => setZooming(false)}
       onMouseMove={handleMove}

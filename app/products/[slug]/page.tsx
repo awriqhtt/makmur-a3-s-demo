@@ -1,13 +1,19 @@
+// app/products/[slug]/page.tsx  (REVISI: halaman detail dilebarkan)
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { X } from "lucide-react";
-import ProductImage from "@/components/ProductImage";
 import RelatedCarousel from "@/components/RelatedCarousel";
-import { ALL_PRODUCTS, getProductBySlug } from "@/lib/data";
-import ProductActions from "@/components/ProductActions";
+import ProductDetailBody from "@/components/ProductDetailBody";
+import {
+  CATALOG_PRODUCTS,
+  getCatalogProduct,
+  getGroupByCode,
+  groupCatalog,
+} from "@/lib/variants";
 
+// Tetap per kode varian supaya link lama (/products/PB-CLIP58) tidak putus.
 export function generateStaticParams() {
-  return ALL_PRODUCTS.map((p) => ({ slug: p.code }));
+  return CATALOG_PRODUCTS.map((p) => ({ slug: p.code }));
 }
 
 export default async function ProductDetailPage({
@@ -16,22 +22,31 @@ export default async function ProductDetailPage({
   params: Promise<{ slug: string }>;
 }) {
   const { slug } = await params;
-  const product = getProductBySlug(slug);
+  const product = getCatalogProduct(slug);
   if (!product) notFound();
 
+  const group = getGroupByCode(product.code);
+  const groupCodes = new Set(group ? group.variants.map((v) => v.code) : []);
+
   // Terkait: utamakan produk di subkategori yang sama, lalu sisanya dari
-  // kategori yang sama. Banyak subkategori cuma berisi 1 produk, jadi tanpa
-  // fallback ini bagian "terkait" sering kosong.
+  // kategori yang sama. Varian dari grup yang sama dibuang, dan varian dari
+  // grup lain dijadikan satu entri supaya tidak muncul berulang.
   // (Di kode: categoryId = subkategori, divisionId = kategori.)
-  const sameSubkategori = ALL_PRODUCTS.filter(
-    (p) => p.categoryId === product.categoryId && p.code !== product.code,
+  const sameSubkategori = CATALOG_PRODUCTS.filter(
+    (p) =>
+      p.categoryId === product.categoryId &&
+      p.code !== product.code &&
+      !groupCodes.has(p.code),
   );
-  const sameKategori = ALL_PRODUCTS.filter(
+  const sameKategori = CATALOG_PRODUCTS.filter(
     (p) =>
       p.divisionId === product.divisionId &&
-      p.categoryId !== product.categoryId,
+      p.categoryId !== product.categoryId &&
+      !groupCodes.has(p.code),
   );
-  const related = [...sameSubkategori, ...sameKategori].slice(0, 8);
+  const related = groupCatalog([...sameSubkategori, ...sameKategori])
+    .map((e) => e.product)
+    .slice(0, 8);
 
   return (
     <div className="max-w-5xl mx-auto px-5 md:px-8 py-12">
@@ -47,37 +62,7 @@ export default async function ProductDetailPage({
         </Link>
       </div>
 
-      <div className="grid md:grid-cols-2 gap-0 border border-line rounded-3xl overflow-hidden">
-        <ProductImage code={product.code} name={product.name} />
-        <div className="p-6 md:p-8">
-          <span className="text-[11px] font-data font-semibold tracking-widest text-brand">
-            {product.code}
-          </span>
-          <h1 className="font-display text-2xl md:text-3xl mt-1 mb-4 leading-tight">
-            {product.name}
-          </h1>
-          {/* Satuan = satuan jual dari pricelist (data pasti). Kolom Packaging
-              & MOQ sengaja tidak ditampilkan dulu karena isinya masih
-              sebagian tebakan (lihat TODO di lib/data.ts). */}
-          <div className="grid grid-cols-2 gap-4 mb-6 font-data">
-            <Spec label="Material" value={product.material} />
-            <Spec label="Ukuran" value={product.size} />
-            <Spec label="Satuan" value={product.unit} />
-            <Spec label="Kategori" value={product.divisionName} />
-          </div>
-          <div className="flex flex-wrap gap-2 mb-6">
-            {["Hotel", "Restoran", "Katering", "Kafe"].map((tag) => (
-              <span
-                key={tag}
-                className="text-xs bg-sand px-3 py-1.5 rounded-full text-ink/70"
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
-          <ProductActions product={product} />
-        </div>
-      </div>
+      <ProductDetailBody key={product.code} product={product} group={group} />
 
       {related.length > 0 && (
         <div className="mt-10">
@@ -87,17 +72,6 @@ export default async function ProductDetailPage({
           <RelatedCarousel products={related} />
         </div>
       )}
-    </div>
-  );
-}
-
-function Spec({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-widest text-ink/45 mb-1">
-        {label}
-      </div>
-      <div className="text-sm font-medium">{value}</div>
     </div>
   );
 }

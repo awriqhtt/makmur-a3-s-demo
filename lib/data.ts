@@ -30,7 +30,10 @@ import productImages from "./product-images.generated.json";
  * 6. Produk "Standard": ukuran belum jelas (sedotan, sendok, bento, dll.)
  * 7. CB-PL16C     : cek isi pack & MOQ
  * 8. Isi per pack untuk produk "1 pack" / "1 roll"
- * 9. Jumlah SKU dihitung otomatis dari data (ALL_PRODUCTS.length)
+ * 9. Jumlah SKU di STATS dihitung dari ALL_PRODUCTS (produk dasar saja,
+ *    belum termasuk varian di variants.ts). Idealnya dihitung dari
+ *    CATALOG_PRODUCTS di file yang mengimpor keduanya (data.ts tidak boleh
+ *    mengimpor variants.ts: circular).
  * 10. Item baru dari compro: OP-TISU, OT-TUSUKGIGI, CB-PPRCUP — detail
  *     (jenis, ukuran, satuan, MOQ) masih TODO, ambil dari pricelist/klien
  * 11. AF-OX1400   : di pricelist ditulis "Alumunium OX1400 + Lid" (tanpa
@@ -46,15 +49,51 @@ import productImages from "./product-images.generated.json";
  * 16. CB-400 : masuk Cup Bowl hanya tebakan dari ukuran. Konfirmasi ke
  *     klien (400 ml bowl atau gelas?). CB-200 sudah dikonfirmasi Bowl.
  * 17. PB-HEAT2035 vs PB-PE2035 : sama-sama 20×35 dan sama-sama di
- *     "Plastik PE & Sheet". Kalau produk yang sama, hapus salah satu.
+ *     "PE, Sheet & Wrapping". Kalau produk yang sama, hapus salah satu.
  *     Material HEAT2035 "Nylon/PA" kemungkinan salah (anti panas biasanya
  *     PP / PE tahan panas).
  * 18. PP-KFT181105 : material "Kraft corrugated" perlu dicek; kalau kotak
  *     makanan, lebih tepat "Kraft paper" / "Kraft board".
  * 19. OT-PAPING-*  : material "LDPE" perlu dicek (piping bag biasanya
  *     PE/PP).
- * 20. PB-GLS & PB-POLYP : penempatan di "Kantong Plastik" adalah
- *     keputusan sementara (GLS bisa pindah ke Cups & Beverage).
+ * 20. PB-GLS ada di "Kantong" (bisa pindah ke "Kemasan Minuman" kalau klien
+ *     setuju). PB-POLYP ada di "Dus, Bag & Mailer". OP-BENANG tampil di
+ *     "Dapur & Bakery" (kode tetap OP-).
+ * --- Baru dari revisi klien (Okt 2026) ---
+ * 21. ATURAN VARIAN: yang jadi varian (chip di detail) hanya UKURAN dan
+ *     WARNA. Beda tipe/model = produk sendiri (mis. Sedotan Steril vs
+ *     Nonsteril, Cup Kertas Polos vs Custom, Vacuum Emboss vs Polos, Latex
+ *     Powder vs Non-powder). Pengecualian: LB Sekat 4 A/B digabung 1 kartu.
+ *     Penggabungan ada di lib/variants.ts (GROUPS). File INI tetap daftar
+ *     produk dasar; varian baru dibuat otomatis di variants.ts dari produk
+ *     dasar. Produk lama yang digantikan grup disembunyikan (legacy) tapi
+ *     URL lamanya tetap jalan.
+ * 22. CB-TWRC200, CB-TWSQ350, CB-TWRD300, CB-TWFB750, CB-TWLB4A : produk
+ *     dasar subkategori "Thinwall, Cup Saus & Bowl". Ukuran lain dibuat di variants.ts
+ *     (Rect 200-1000, Square 350-3000, Round 300/450, Food Box 750/1000,
+ *     Bowl lewat grup Cup Bowl). Isi unit/pack/MOQ masih tebakan.
+ *     SEMENTARA DINONAKTIFKAN: lihat DISABLED_CODES di bawah (dan
+ *     DISABLED_GROUP_IDS di lib/variants.ts).
+ * 23. FI-KISMIS, FI-PUFF750 : produk baru Bahan Baku. Isi pack/MOQ
+ *     masih tebakan. Puff Pastry tanpa brand: di variants.ts ubah nama grup
+ *     "Puff Pastry EDO" jadi "Puff Pastry".
+ * 24. ON-RECHECK tinggal Tisu (OP-TISU), sengaja belum diubah. Kantong
+ *     Plastik sudah dikerjakan (15/17/24/28/35/40, PB-50 jumbo dipisah).
+ * 25. Produk BARU yang dibuat otomatis di variants.ts (isi pack/MOQ
+ *     disalin dari produk dasar, cek per ukuran): Cup Plastik 10/14 oz +
+ *     Custom 10/12/14 oz, Cup Kertas Polos & Custom 4/6,5/8/12/14/16 oz,
+ *     Foil Roll 30x7,6 / 45x75 / 30x150 / 45x150, Kantong Plastik 17 & 40,
+ *     Plastik Wrapping 30/40/45 x 250/500, Thermal 30/38/40/50/60/70 mm,
+ *     Vacuum Emboss & Polos (43 ukuran), Plastik Bawang/Klip/OPP (ukuran
+ *     acuan), Handglove Nitrile & semua ukuran/warna, Lakban & Rafia warna.
+ * 26. Kode baru di variants.ts belum punya foto sendiri; kartu/detail
+ *     memakai foto grup (varian atau produk lama yang punya foto).
+ * --- Struktur kategori FINAL (Okt 2026) ---
+ * 27. Struktur tampil = LAYOUT (di bawah RAW_DIVISIONS): 8 Kategori,
+ *     19 Subkategori. ATURAN: tidak ada subkategori dengan 1 kartu sendirian. RAW_DIVISIONS cuma gudang data produk. Pindah produk
+ *     antar subkategori = pindahkan KODE-nya di LAYOUT, jangan objeknya.
+ *     Produk baru di RAW_DIVISIONS WAJIB didaftarkan di LAYOUT, kalau tidak
+ *     tidak tampil (ada peringatan di terminal saat dev).
  *
  * CATATAN:
  * - Kode produk berubah di 2 tempat (harus rename file gambar di
@@ -62,8 +101,14 @@ import productImages from "./product-images.generated.json";
  *     FI-ARANG  -> OT-ARANG
  *     OT-BENANG -> OP-BENANG
  *   URL produk juga ikut berubah (slug = kode).
+ * - Kode foil roll juga diseragamkan ke pola AF-RL-<lebar>-<panjang>
+ *   (nama file gambar harus sama):
+ *     AF-014 -> AF-RL-45-300
+ *     AF-021 -> AF-RL-45-76
  * - Kode lain TIDAK diubah, supaya mapping gambar tetap jalan
  *   (termasuk CB-035..CB-650 yang sekarang jadi Cup Saus / Cup Bowl).
+ *   Karena itu prefix kode (AF-, DC-, FI-, OT-, HG-) tidak selalu sama
+ *   dengan Kategori tempat produk tampil.
  * - Nama produk mengikuti PRICELIST klien. Ejaan/format boleh dirapikan,
  *   tapi istilahnya jangan diganti (Handglove, Drink Tray, dst).
  *   Pengecualian: "Cup Saus"/"Cup Bowl" dan "Kraft Food Box" adalah
@@ -160,7 +205,11 @@ export type Division = {
   categories: Category[];
 };
 
-export const DIVISIONS: Division[] = [
+// ---------------------------------------------------------------------------
+// RAW_DIVISIONS = GUDANG DATA PRODUK. Pengelompokan di sini TIDAK dipakai
+// untuk tampilan; lihat LAYOUT di bawah. Isi produk tidak diubah.
+// ---------------------------------------------------------------------------
+const RAW_DIVISIONS: Division[] = [
   {
     id: "foil",
     code: "AF",
@@ -172,9 +221,11 @@ export const DIVISIONS: Division[] = [
       {
         id: "af-roll",
         name: "Foil Roll",
+        // Digabung jadi "Aluminium Foil Roll" di variants.ts, 7 ukuran
+        // (30x7,6 / 45x7,6 / 45x75 / 30x150 / 45x150 / 30x300 / 45x300).
         products: [
           {
-            code: "AF-014",
+            code: "AF-RL-45-300",
             name: "Aluminium Foil 45 cm × 300 m",
             material: "Food-grade aluminium",
             size: "45 cm × 300 m",
@@ -183,7 +234,7 @@ export const DIVISIONS: Division[] = [
             moq: "10 karton",
           },
           {
-            code: "AF-021",
+            code: "AF-RL-45-76",
             name: "Aluminium Foil 45 cm × 7,6 m",
             material: "Food-grade aluminium",
             size: "45 cm × 7,6 m",
@@ -268,7 +319,7 @@ export const DIVISIONS: Division[] = [
         name: "Food Box (Thinwall & Bento)",
         products: [
           {
-            code: "PP-TW800",
+            code: "PP-TW-ALL",
             name: "Brown Paper Thinwall 800 ml",
             material: "Kraft-lined thinwall",
             size: "800 ml",
@@ -293,7 +344,7 @@ export const DIVISIONS: Division[] = [
             unit: "Pcs",
             pack: "25 pcs / bundle",
             moq: "4 bundle",
-          }, // TODO: pindah dari Dus & Box. Cek material (kemungkinan "Kraft paper"/"Kraft board", bukan corrugated)
+          }, // TODO: cek material (kemungkinan "Kraft paper"/"Kraft board", bukan corrugated)
         ],
       },
       {
@@ -328,7 +379,7 @@ export const DIVISIONS: Division[] = [
             moq: "2 bundle",
           },
           {
-            code: "PP-DUSXL",
+            code: "PP-DUS604030",
             name: "Dus Big Order 60×40×30",
             material: "5-ply heavy duty",
             size: "60×40×30 cm",
@@ -376,9 +427,11 @@ export const DIVISIONS: Division[] = [
         id: "pp-food-sheet",
         name: "Food Paper Sheet",
         products: [
+          // Revisi klien: Kertas Shawarma harus yang POLOS (bukan custom gambar).
+          // Foto produknya juga perlu diganti ke versi polos.
           {
             code: "PP-SHAW30",
-            name: "Kertas Shawarma 30×30",
+            name: "Kertas Shawarma",
             material: "Greaseproof paper",
             size: "30×30 cm",
             unit: "Rim",
@@ -386,23 +439,23 @@ export const DIVISIONS: Division[] = [
             moq: "5 rim",
           },
           {
-            code: "PP-NASI-C",
-            name: "Kertas Nasi Coklat",
+            code: "PP-NASI-C-2535",
+            name: "Kertas Nasi Coklat Warteg",
             material: "Food-grade paper",
-            size: "Standard",
+            size: "25×35 cm",
             unit: "Pack",
             pack: "500 lembar / pack",
             moq: "5 pack",
-          }, // TODO: isi ukuran
+          }, // TODO: konfirmasi ukuran & isi pack ke klien
           {
-            code: "PP-NASI-P",
+            code: "PP-NASI-P-2527",
             name: "Kertas Nasi Putih",
             material: "Food-grade paper",
-            size: "Standard",
+            size: "25×27 cm",
             unit: "Pack",
             pack: "500 lembar / pack",
             moq: "5 pack",
-          }, // TODO: kalau Cap Gajah, cantumkan di nama; isi ukuran
+          }, // TODO: konfirmasi ukuran & isi pack ke klien/ TODO: kalau Cap Gajah, cantumkan di nama; isi ukuran
           {
             code: "PP-BAKE",
             name: "Baking Paper",
@@ -492,8 +545,64 @@ export const DIVISIONS: Division[] = [
         ],
       },
       {
+        // BARU dari daftar PP Thinwall klien (tanpa brand). Isi di bawah hanya
+        // produk DASAR tiap grup; ukuran lainnya dibuat di lib/variants.ts.
+        // TODO: unit/pack/MOQ tebakan, belum ada di pricelist.
+        id: "cb-thinwall",
+        name: "Thinwall PP (+ Lid)",
+        products: [
+          {
+            code: "CB-TWRC200",
+            name: "PP Thinwall Rectangle 200 ml",
+            material: "PP food-grade",
+            size: "200 ml",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          },
+          {
+            code: "CB-TWSQ350",
+            name: "PP Thinwall Square 350 ml",
+            material: "PP food-grade",
+            size: "350 ml",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          },
+          {
+            code: "CB-TWRD300",
+            name: "PP Thinwall Round 300 ml",
+            material: "PP food-grade",
+            size: "300 ml",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          },
+          {
+            code: "CB-TWFB750",
+            name: "PP Thinwall Food Box 750 ml",
+            material: "PP food-grade",
+            size: "750 ml",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          },
+          {
+            code: "CB-TWLB4A",
+            name: "PP Thinwall LB Sekat 4 A",
+            material: "PP food-grade",
+            size: "Tipe A",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          },
+        ],
+      },
+      {
         id: "cb-gelas",
         name: "Gelas Minuman",
+        // Cup Plastik 10/12/14/16 oz (biasa) dan Custom 10/12/14/16 oz dibuat di
+        // variants.ts dari CB-PL12 dan CB-PL16C.
         // TODO: dome lid belum ditambah sebagai produk (ada di gambar katalog)
         products: [
           {
@@ -523,8 +632,8 @@ export const DIVISIONS: Division[] = [
             pack: "500 pcs",
             moq: "5 karton",
           }, // TODO: cek isi pack & MOQ
+          // Legacy: diganti Cup Kertas Polos & Cup Kertas Custom (4-16 oz) di variants.ts.
           {
-            // BARU dari compro: "Cup plastik/kertas custom"
             code: "CB-PPRCUP",
             name: "Cup Kertas (Custom)",
             material: "Paper",
@@ -541,7 +650,7 @@ export const DIVISIONS: Division[] = [
         products: [
           {
             code: "CB-BTL250",
-            name: "Botol Plastik Pir 250 ml",
+            name: "Botol Plastik Pir",
             material: "PET",
             size: "250 ml",
             unit: "Btl",
@@ -562,7 +671,7 @@ export const DIVISIONS: Division[] = [
             unit: "Pcs",
             pack: "500 pcs / pack",
             moq: "10 pack",
-          }, // TODO: isi ukuran
+          }, // legacy → diganti Sedotan Steril/Nonsteril di variants.ts
           {
             code: "CB-STIRRER",
             name: "Stirrer Straw",
@@ -571,7 +680,7 @@ export const DIVISIONS: Division[] = [
             unit: "Pack",
             pack: "500 pcs / pack",
             moq: "10 pack",
-          }, // TODO: isi ukuran
+          }, // legacy → varian 12/15/17 cm di variants.ts
           {
             code: "CB-TRAY4",
             name: "Drink Tray 4 Cup",
@@ -581,15 +690,16 @@ export const DIVISIONS: Division[] = [
             pack: "50 pcs / karton",
             moq: "5 karton",
           },
+          // Revisi klien: ukuran dihilangkan (size dikosongkan, baris Ukuran otomatis tidak tampil).
           {
-            code: "CB-SEAL15",
-            name: "Plastik Sealed Minuman 15 cm",
+            code: "CB-SEAL",
+            name: "Plastik Sealed Minuman",
             material: "PP sealing film",
-            size: "15 cm",
+            size: "",
             unit: "Roll",
             pack: "1 roll",
             moq: "10 roll",
-          }, // TODO: isi panjang roll
+          },
         ],
       },
     ],
@@ -603,6 +713,7 @@ export const DIVISIONS: Division[] = [
       "Rangkaian alat makan sekali pakai untuk volume QSR, katering, dan delivery.",
     categories: [
       {
+        // Semua tanpa brand. Varian warna (bening/putih/hitam) dibuat di variants.ts.
         id: "dc-cutlery",
         name: "Cutlery",
         products: [
@@ -667,6 +778,8 @@ export const DIVISIONS: Division[] = [
         id: "pb-kantong",
         name: "Kantong Plastik",
         // TODO: ukuran PB-15..PB-50 belum ada satuan (cm?)
+        // PB-15/24/28/35 digabung jadi "Kantong Plastik" di variants.ts
+        // (+ 17 dan 40 yang dibuat di sana). PB-50 = jumbo, tetap produk sendiri.
         products: [
           {
             code: "PB-15",
@@ -706,7 +819,7 @@ export const DIVISIONS: Division[] = [
           },
           {
             code: "PB-50",
-            name: "Kantong Plastik 50",
+            name: "Kantong Plastik Jumbo 50",
             material: "HDPE",
             size: "50",
             unit: "Pack",
@@ -721,9 +834,8 @@ export const DIVISIONS: Division[] = [
             unit: "Pack",
             pack: "1 pack",
             moq: "10 pack",
-          }, // TODO: isi ukuran & per pack; konfirmasi "Juzz"; bisa pindah ke Cups & Beverage
+          }, // legacy → varian 1 cup / 2 cup di variants.ts; TODO: konfirmasi "Juzz"
           {
-            // Pindah dari Operational Supplies (kode sudah PB).
             code: "PB-TR60100",
             name: "Kantong Plastik Sampah 60×100",
             material: "LDPE",
@@ -749,12 +861,13 @@ export const DIVISIONS: Division[] = [
             unit: "Pcs",
             pack: "100 pcs / pack",
             moq: "5 pack",
-          }, // TODO: isi ukuran; penempatan sementara di Kantong Plastik
+          }, // TODO: isi ukuran
         ],
       },
       {
         id: "pb-pe-sheet",
         name: "Plastik PE & Sheet",
+        // Revisi klien: foto produk memakai gambar PENGGUNAAN produk.
         products: [
           {
             code: "PB-PE1025",
@@ -839,7 +952,7 @@ export const DIVISIONS: Division[] = [
           }, // TODO: isi per pack
           {
             code: "PB-SPR60100",
-            name: "Plastik Suprah 60×100",
+            name: "Plastik Suprah",
             material: "PE",
             size: "60×100 cm",
             unit: "Pack",
@@ -851,6 +964,8 @@ export const DIVISIONS: Division[] = [
       {
         id: "pb-klip-opp",
         name: "Plastik Klip & OPP",
+        // Ukuran acuan Klip & OPP di variants.ts sementara disamakan dengan Plastik
+        // Bawang (16 ukuran). TODO: konfirmasi ke klien.
         products: [
           {
             code: "PB-CLIP58",
@@ -902,6 +1017,9 @@ export const DIVISIONS: Division[] = [
       {
         id: "pb-vacuum-wrap",
         name: "Plastik Vacuum & Wrap",
+        // Plastik Vacuum: 3 produk lama di bawah jadi legacy; diganti 2 produk
+        // (Plastik Vacuum Emboss dan Polos), masing-masing 43 ukuran, di variants.ts.
+        // Plastik Wrapping: ukuran 30/40/45 x 250/500 dibuat di variants.ts.
         products: [
           {
             code: "PB-VAC1218",
@@ -952,6 +1070,9 @@ export const DIVISIONS: Division[] = [
       "Handglove, lakban, tali, thermal roll, dan tisu yang menjaga operasional back-of-house tetap jalan.",
     categories: [
       {
+        // Semua tanpa brand. 4 produk lama jadi legacy; diganti 4 produk di variants.ts:
+        // Handglove Nitrile, Latex Powder, Latex Non-powder, Plastik
+        // (masing-masing ukuran XS-XL x warna putih/hitam).
         id: "op-glove",
         name: "Handglove",
         products: [
@@ -994,6 +1115,8 @@ export const DIVISIONS: Division[] = [
         ],
       },
       {
+        // Lakban Bening & Coklat jadi varian warna di variants.ts (+ Hitam, Putih,
+        // Merah, Biru, Hijau, Pink). Lakban Fragile tetap produk sendiri.
         id: "op-tape",
         name: "Lakban",
         products: [
@@ -1038,7 +1161,7 @@ export const DIVISIONS: Division[] = [
             unit: "Roll",
             pack: "1 roll",
             moq: "10 roll",
-          }, // TODO: isi ukuran; compro: "rafia semua warna"
+          }, // legacy → varian 9 warna di variants.ts (tanpa brand)
           {
             code: "OP-RUBBER",
             name: "Karet Gelang",
@@ -1048,10 +1171,10 @@ export const DIVISIONS: Division[] = [
             pack: "1 kg / pack",
             moq: "5 kg",
           }, // TODO: isi ukuran
+          // Kode lama: OT-BENANG. Revisi klien: nama "Benang Ayam / Tali Ayam", gambar tanpa brand.
           {
-            // Kode lama: OT-BENANG. Pindah dari Other Supplies.
             code: "OP-BENANG",
-            name: "Benang Ayam",
+            name: "Benang Ayam / Tali Ayam",
             material: "Cotton",
             size: "Standard",
             unit: "Pack",
@@ -1063,6 +1186,7 @@ export const DIVISIONS: Division[] = [
       {
         id: "op-thermal-tisu",
         name: "Thermal & Tisu",
+        // ON-RECHECK: OP-TISU sengaja belum diubah.
         products: [
           {
             code: "OP-TH5730",
@@ -1082,8 +1206,8 @@ export const DIVISIONS: Division[] = [
             pack: "10 roll / pack",
             moq: "5 pack",
           },
+          // BARU dari compro: "Tisu semua ukuran, jenis dan merk"
           {
-            // BARU dari compro: "Tisu semua ukuran, jenis dan merk"
             code: "OP-TISU",
             name: "Tisu",
             material: "Paper",
@@ -1116,15 +1240,37 @@ export const DIVISIONS: Division[] = [
             pack: "1 kg / pack",
             moq: "5 kg",
           },
+          // Revisi klien: Kelapa Parut Kering per 500 gram.
           {
             code: "FI-COCO",
             name: "Kelapa Parut Kering",
             material: "Coconut",
+            size: "500 g",
+            unit: "Pack",
+            pack: "500 g / pack",
+            moq: "10 pack",
+          },
+          // BARU (revisi klien)
+          {
+            code: "FI-KISMIS",
+            name: "Kismis",
+            material: "Raisin",
             size: "Bulk",
             unit: "Kg",
             pack: "1 kg / pack",
             moq: "5 kg",
-          },
+          }, // TODO: isi pack & MOQ
+          // BARU (revisi klien): Puff Pastry (tanpa brand), 2 berat (750 g & 375 g).
+          // Varian 375 g dibuat di variants.ts.
+          {
+            code: "FI-PUFF750",
+            name: "Puff Pastry 750 g",
+            material: "Pastry dough",
+            size: "750 g",
+            unit: "Pack",
+            pack: "1 pack",
+            moq: "10 pack",
+          }, // TODO: isi pack & MOQ
         ],
       },
     ],
@@ -1141,8 +1287,8 @@ export const DIVISIONS: Division[] = [
         id: "ot-grill",
         name: "Arang & Tusuk",
         products: [
+          // Kode lama: FI-ARANG. Diganti supaya awalan sesuai divisi.
           {
-            // Kode lama: FI-ARANG. Diganti supaya awalan sesuai divisi.
             code: "OT-ARANG",
             name: "Arang Batok Kelapa",
             material: "Coconut shell",
@@ -1184,7 +1330,7 @@ export const DIVISIONS: Division[] = [
             unit: "Pcs",
             pack: "1 pcs",
             moq: "20 pcs",
-          }, // TODO: isi ukuran
+          }, // legacy → varian 30/40/50 di variants.ts
           {
             code: "OT-PAPING-BSR",
             name: "Paping Bag Besar",
@@ -1209,6 +1355,304 @@ export const DIVISIONS: Division[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// LAYOUT = STRUKTUR KATEGORI FINAL (Okt 2026): 8 Kategori, 19 Subkategori.
+// Inilah yang tampil di Header, sidebar, dan katalog. Pindah produk antar
+// subkategori = pindahkan KODE-nya di sini saja.
+// ---------------------------------------------------------------------------
+type LayoutCategory = { id: string; name: string; codes: string[] };
+type Layout = Omit<Division, "categories"> & { categories: LayoutCategory[] };
+
+const LAYOUT: Layout[] = [
+  {
+    id: "foil",
+    code: "AF",
+    name: "Aluminium Foil",
+    icon: Package,
+    blurb:
+      "Aluminium foil roll dan foil tray beserta lid untuk kebutuhan pengemasan makanan.",
+    categories: [
+      {
+        // Pengecualian aturan "min. 2 kartu": 1 kartu tapi 7 ukuran.
+        id: "af-roll",
+        name: "Foil Roll",
+        codes: ["AF-RL-45-76", "AF-RL-45-300"],
+      },
+      {
+        id: "af-tray",
+        name: "Foil Tray",
+        codes: [
+          "AF-BX4381",
+          "AF-BX52180",
+          "AF-RX145",
+          "AF-RX725",
+          "AF-RX1200",
+          "AF-OX1400",
+        ],
+      },
+    ],
+  },
+  {
+    id: "paper",
+    code: "PP",
+    name: "Paper & Corrugated Packaging",
+    icon: Boxes,
+    blurb:
+      "Bento, kraft, dus corrugated, dan kertas makanan untuk delivery, retail, dan pengiriman.",
+    categories: [
+      {
+        id: "pp-foodbox",
+        name: "Food Box & Bento",
+        codes: ["PP-TW-ALL", "PP-BENTO", "PP-KFT181105"],
+      },
+      {
+        id: "pp-dus-bag",
+        name: "Dus, Bag & Mailer",
+        // data.ts → LAYOUT → id: "pp-dus-bag"
+        codes: [
+          "PP-DUS151005",
+          "PP-DUS252010",
+          "PP-DUS392624",
+          "PP-DUS604030", // sebelumnya "PP-DUSXL"
+          "PP-BAG-S",
+          "PP-BAG-M",
+          "PP-BAG-L",
+          "PB-POLYP",
+        ],
+      },
+      {
+        id: "pp-food-paper",
+        name: "Food Paper",
+        codes: ["PP-SHAW30", "PP-NASI-C-2535", "PP-NASI-P-2527", "PP-BAKE"],
+      },
+    ],
+  },
+  {
+    id: "cups",
+    code: "CB",
+    name: "Cups, Lids & Beverage Packaging",
+    icon: Coffee,
+    blurb:
+      "Thinwall, cup saus, bowl, gelas minuman, botol, dan pelengkap minuman untuk cafe dan brand minuman.",
+    categories: [
+      {
+        id: "cb-thinwall",
+        name: "Thinwall, Cup Saus & Bowl",
+        codes: [
+          "CB-035",
+          "CB-100",
+          "CB-150",
+          "CB-200",
+          "CB-400",
+          "CB-650",
+          "CB-TWRC200",
+          "CB-TWSQ350",
+          "CB-TWRD300",
+          "CB-TWFB750",
+          "CB-TWLB4A",
+        ],
+      },
+      {
+        id: "cb-kemasan-minuman",
+        name: "Kemasan Minuman",
+        codes: ["CB-PL12", "CB-PL16", "CB-PL16C", "CB-PPRCUP", "CB-BTL250"],
+      },
+      {
+        id: "cb-pelengkap",
+        name: "Pelengkap Minuman",
+        codes: ["CB-STRAW", "CB-STIRRER", "CB-TRAY4", "CB-SEAL"],
+      },
+    ],
+  },
+  {
+    id: "cutlery",
+    code: "DC",
+    name: "Disposable Cutlery & Tableware",
+    icon: UtensilsCrossed,
+    blurb:
+      "Rangkaian alat makan sekali pakai untuk volume QSR, katering, dan delivery.",
+    categories: [
+      {
+        id: "dc-cutlery",
+        name: "Cutlery",
+        codes: ["DC-FORK", "DC-SPOON", "DC-TSPOON", "DC-PUD", "DC-SPFK"],
+      },
+    ],
+  },
+  {
+    id: "plastics",
+    code: "PB",
+    name: "Plastic Bags & Films",
+    icon: Recycle,
+    blurb:
+      "Kantong, plastik PE, klip, OPP, vacuum, dan wrapping untuk retail dan packing.",
+    categories: [
+      {
+        id: "pb-kantong",
+        name: "Kantong",
+        codes: [
+          "PB-15",
+          "PB-24",
+          "PB-28",
+          "PB-35",
+          "PB-50",
+          "PB-GLS",
+          "PB-TR60100",
+          "PB-TR90120",
+        ],
+      },
+      {
+        id: "pb-pe-sheet",
+        name: "Plastik PE & Sheet",
+        codes: [
+          "PB-PE1025",
+          "PB-PE1225",
+          "PB-PE1530",
+          "PB-PE2035",
+          "PB-HEAT2035",
+          "PB-BWG1020",
+          "PB-BWG1225",
+          "PB-SHT2020",
+          "PB-SHT2535",
+          "PB-SPR60100",
+        ],
+      },
+      {
+        id: "pb-klip-opp",
+        name: "Klip & OPP",
+        codes: [
+          "PB-CLIP58",
+          "PB-CLIP107",
+          "PB-CLIP1387",
+          "PB-OPP722",
+          "PB-OPP925",
+        ],
+      },
+      {
+        id: "pb-kemasan-produk",
+        name: "Kemasan Produk",
+        codes: ["PB-VAC1218", "PB-VAC1520", "PB-VAC3040", "PB-WRAP30500"],
+      },
+    ],
+  },
+  {
+    id: "ops",
+    code: "OP",
+    name: "Operational Supplies",
+    icon: ShieldCheck,
+    blurb:
+      "Handglove, tisu, kertas kasir, lakban, dan tali yang menjaga operasional back-of-house tetap jalan.",
+    categories: [
+      {
+        id: "op-outlet",
+        name: "Outlet Supplies",
+        codes: [
+          "OP-GLVL-S",
+          "OP-GLVL-M",
+          "OP-GLVL-L",
+          "OP-GLVP",
+          "OP-TISU",
+          "OP-TH5730",
+          "OP-TH8080",
+        ],
+      },
+      {
+        id: "op-packing",
+        name: "Packing",
+        codes: [
+          "OP-TAPE-CL",
+          "OP-TAPE-BR",
+          "OP-TAPE-FR",
+          "OP-RAFIA",
+          "OP-RUBBER",
+        ],
+      },
+    ],
+  },
+  {
+    id: "ingredients",
+    code: "FI",
+    name: "Food Ingredients & Raw Materials",
+    icon: Wheat,
+    blurb: "Bahan baku pilihan untuk bakery dan commissary.",
+    categories: [
+      {
+        id: "fi-bahan-baku",
+        name: "Bahan Baku",
+        codes: ["FI-ALMND", "FI-COCO", "FI-KISMIS", "FI-PUFF750"],
+      },
+    ],
+  },
+  {
+    id: "other",
+    code: "OT",
+    name: "Other Supplies",
+    icon: Layers,
+    blurb:
+      "Kebutuhan dapur, bakery, dan grill yang melengkapi pesanan full-service.",
+    categories: [
+      {
+        id: "ot-grill",
+        name: "Arang & Tusuk",
+        codes: ["OT-ARANG", "OT-TUSUK", "OT-TUSUKGIGI"],
+      },
+      {
+        id: "ot-dapur-bakery",
+        name: "Dapur & Bakery",
+        codes: ["OT-TAMPAH", "OT-PAPING-BSR", "OT-PAPING-KCL", "OP-BENANG"],
+      },
+    ],
+  },
+];
+
+const RAW_BY_CODE = new Map(
+  RAW_DIVISIONS.flatMap((d) => d.categories.flatMap((c) => c.products)).map(
+    (p) => [p.code, p],
+  ),
+);
+
+// Produk yang disembunyikan sementara dari katalog. Data tetap ada di
+// RAW_DIVISIONS dan LAYOUT. Kosongkan set ini untuk menampilkannya lagi.
+// (Pasangannya: DISABLED_GROUP_IDS di lib/variants.ts.)
+const DISABLED_CODES = new Set([
+  "CB-TWRC200",
+  "CB-TWSQ350",
+  "CB-TWRD300",
+  "CB-TWFB750",
+  "CB-TWLB4A",
+]);
+
+export const DIVISIONS: Division[] = LAYOUT.map((d) => ({
+  ...d,
+  categories: d.categories.map((c) => ({
+    id: c.id,
+    name: c.name,
+    products: c.codes.flatMap((code) => {
+      if (DISABLED_CODES.has(code)) return [];
+      const p = RAW_BY_CODE.get(code);
+      if (!p && process.env.NODE_ENV !== "production") {
+        console.warn(
+          `[data] kode "${code}" di LAYOUT tidak ada di RAW_DIVISIONS`,
+        );
+      }
+      return p ? [p] : [];
+    }),
+  })),
+}));
+
+// Pengaman: produk di RAW_DIVISIONS yang lupa didaftarkan ke LAYOUT tidak
+// akan tampil di katalog, jadi dikasih peringatan saat dev.
+if (process.env.NODE_ENV !== "production") {
+  const placed = new Set(
+    LAYOUT.flatMap((d) => d.categories.flatMap((c) => c.codes)),
+  );
+  for (const code of RAW_BY_CODE.keys()) {
+    if (!placed.has(code)) {
+      console.warn(`[data] produk "${code}" belum masuk LAYOUT`);
+    }
+  }
+}
+
 export const ALL_PRODUCTS: Product[] = DIVISIONS.flatMap((d) =>
   d.categories.flatMap((c) =>
     c.products.map((p) => ({
@@ -1227,14 +1671,17 @@ export function getProductBySlug(slug: string): Product | undefined {
 
 // Produk unggulan di homepage. Urutan di sini = urutan tampil.
 // Ganti produk cukup dengan edit daftar kode ini. Kode yang salah ketik atau
-// sudah dihapus dari katalog otomatis dilewati oleh getFeaturedProducts().
+// sudah dihapus dari katalog otomatis dilewati.
+// Homepage sebaiknya memakai getFeaturedCatalogProducts(FEATURED_CODES) dari
+// lib/variants.ts: kode legacy (mis. OP-GLVL-M, OP-RAFIA, OT-TAMPAH) otomatis
+// jadi varian pertama grupnya, dan satu grup hanya tampil sekali.
 export const FEATURED_CODES = [
-  "AF-014", // Aluminium Foil 45 cm × 300 m
+  "AF-RL-45-300", // Aluminium Foil 45 cm × 300 m
   "AF-OX1400", // Aluminium Foil OX1400 + Lid
   "PP-BENTO", // Bento Box
   "CB-100", // Cup Saus 100 ml + Lid
   "CB-400", // Cup Bowl 400 ml + Lid
-  "PP-NASI-P", // Kertas Nasi Putih
+  "PP-NASI-P-2527", // Kertas Nasi Putih // Kertas Nasi Putih
   "DC-SPOON", // Sendok Makan Plastik
   "DC-SPFK", // Spoon Fork
   "PB-15", // Kantong Plastik 15
@@ -1314,9 +1761,11 @@ export function getIndustryIcon(name: string) {
 }
 
 // Dihitung otomatis dari data supaya selalu cocok dengan katalog.
+// CATATAN: ini baru menghitung produk DASAR (belum termasuk varian di
+// variants.ts), jadi angkanya lebih kecil dari isi katalog sebenarnya.
 const TOTAL_SKU = ALL_PRODUCTS.length;
-// Dibulatkan ke bawah per 10 → 91 SKU tampil "90+", jadi selalu jujur dan
-// ikut naik sendiri kalau produk bertambah.
+// Dibulatkan ke bawah per 10, jadi selalu jujur dan ikut naik sendiri kalau
+// produk bertambah.
 const SKU_DIBULATKAN = Math.floor(TOTAL_SKU / 10) * 10;
 const TOTAL_JENIS_PRODUK = DIVISIONS.reduce(
   (n, d) => n + d.categories.length,

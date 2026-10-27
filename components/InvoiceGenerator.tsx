@@ -1259,6 +1259,7 @@ function InvoiceDocument({
   showLogo,
   showMateraiBox,
   showSjStamp,
+  showSjSignature,
   taxRate,
   taxAmount,
   shippingAddress,
@@ -1787,11 +1788,20 @@ function InvoiceDocument({
         {showRest && (
           <div data-pg="rest" className={`relative z-10 ${isSJ ? "pt-4" : ""}`}>
             {isSJ ? (
-              <div className="flex items-end justify-between gap-8 mt-6">
-                <div className="flex flex-col items-center gap-1 w-32">
-                  <div className="relative w-full h-16">
+              <div className="flex items-start justify-between gap-8 mt-6">
+                {/* Pengirim: tanda tangan di bawah, cap menimpa di atas */}
+                <div {...tp("ttd", "flex flex-col items-center gap-1 w-40")}>
+                  <div className="relative w-full h-[72px]">
+                    {showSjSignature && signatureUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={signatureUrl}
+                        alt="Tanda tangan"
+                        className="absolute right-2 bottom-1 z-0 h-16 max-w-[110px] object-contain"
+                      />
+                    )}
                     {showSjStamp && (
-                      <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="absolute left-0 bottom-1 z-10">
                         <StampImage
                           style={{
                             width: 124,
@@ -1804,12 +1814,22 @@ function InvoiceDocument({
                       </div>
                     )}
                   </div>
-                  <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
-                    Pengirim
+                  <div className="w-full border-t border-ink/30 pt-1 text-center">
+                    <p className="text-xs text-ink/50">Pengirim</p>
+                    {signerName && (
+                      <p className="text-xs font-semibold text-ink/70 mt-0.5">
+                        {signerName}
+                      </p>
+                    )}
+                    {signerTitle && (
+                      <p className="text-[11px] text-ink/50">{signerTitle}</p>
+                    )}
                   </div>
                 </div>
-                <div className="flex flex-col items-center gap-1 w-32">
-                  <div className="h-16" />
+
+                {/* Penerima */}
+                <div className="flex flex-col items-center gap-1 w-40">
+                  <div className="h-[72px] w-full" />
                   <div className="w-full border-t border-ink/30 pt-1 text-xs text-ink/50 text-center">
                     Penerima
                   </div>
@@ -2147,7 +2167,10 @@ export default function InvoiceGenerator() {
         { id: "ttd", label: "TTD", icon: PenTool },
       );
     } else {
-      base.push({ id: "barang", label: "Barang", icon: Package });
+      base.push(
+        { id: "barang", label: "Barang", icon: Package },
+        { id: "ttd", label: "TTD", icon: PenTool },
+      );
     }
     return base;
   }, [docType]);
@@ -2244,9 +2267,12 @@ export default function InvoiceGenerator() {
   const [showLogo, setShowLogo] = useState(true);
   // Kotak kosong buat nempel materai manual — default mati.
   const [showMateraiBox, setShowMateraiBox] = useState(false);
-  // Cap perusahaan di kolom "Pengirim" surat jalan — default mati (SJ
-  // biasanya ditandatangani/dicap basah saat serah terima).
-  const [showSjStamp, setShowSjStamp] = useState(false);
+  // Cap perusahaan di kolom "Pengirim" surat jalan — default nyala, sama
+  // seperti invoice. Bisa dimatikan lewat tab TTD (misal kalau pakai cap basah).
+  const [showSjStamp, setShowSjStamp] = useState(true);
+  // Tanda tangan di kolom "Pengirim" surat jalan (pakai file TTD yang sama
+  // dengan invoice).
+  const [showSjSignature, setShowSjSignature] = useState(true);
 
   // Bundling invoice + surat jalan. Default mati, dan di-reset tiap pindah
   // tab Invoice <-> Surat Jalan supaya artinya selalu jelas:
@@ -3109,6 +3135,7 @@ export default function InvoiceGenerator() {
       showLogo,
       showMateraiBox,
       showSjStamp,
+      showSjSignature,
       taxRate,
       taxAmount,
       shippingAddress: shipment?.shipTo ?? DEFAULT_SHIP_TO,
@@ -3419,7 +3446,7 @@ export default function InvoiceGenerator() {
   );
 
   // Pengaturan tampilan kop — dipakai di tab Invoice/Surat Jalan (desktop)
-  // dan di sheet ⚙️ (HP).
+  // dan di sheet ⚙️ (HP). Cap & tanda tangan ada di tab TTD.
   const tampilanUi = (
     <div className="flex flex-col gap-2">
       <SidebarSubLabel>Tampilan</SidebarSubLabel>
@@ -3437,17 +3464,6 @@ export default function InvoiceGenerator() {
           Logo dimatikan — kop tetap menampilkan nama &quot;Makmur
           A3&apos;S&quot; dalam bentuk teks.
         </p>
-      )}
-      {docType === "suratJalan" && (
-        <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
-          <span className="text-sm text-ink/80">Cap di kolom Pengirim</span>
-          <input
-            type="checkbox"
-            checked={showSjStamp}
-            onChange={(e) => setShowSjStamp(e.target.checked)}
-            className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
-          />
-        </label>
       )}
     </div>
   );
@@ -4147,10 +4163,15 @@ export default function InvoiceGenerator() {
         </>
       )}
 
-      {docType === "invoice" && activeSidebarTab === "ttd" && (
+      {activeSidebarTab === "ttd" && (
         <>
-          <SidebarSectionHeader icon={PenTool} label="Tanda Tangan" />
-          {showMateraiNotice && (
+          <SidebarSectionHeader
+            icon={PenTool}
+            label="Tanda Tangan"
+            hint={docType === "suratJalan" ? "Kolom Pengirim" : undefined}
+          />
+
+          {docType === "invoice" && showMateraiNotice && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-900 leading-relaxed">
               <p className="flex items-center gap-1 font-semibold">
                 <AlertTriangle className="w-3 h-3" /> Perlu materai
@@ -4170,24 +4191,47 @@ export default function InvoiceGenerator() {
               )}
             </div>
           )}
+
           <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
             <span className="text-sm text-ink/80">Tampilkan cap</span>
             <input
               type="checkbox"
-              checked={showStamp}
-              onChange={(e) => setShowStamp(e.target.checked)}
+              checked={docType === "invoice" ? showStamp : showSjStamp}
+              onChange={(e) =>
+                docType === "invoice"
+                  ? setShowStamp(e.target.checked)
+                  : setShowSjStamp(e.target.checked)
+              }
               className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
             />
           </label>
-          <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
-            <span className="text-sm text-ink/80">Kotak tempel materai</span>
-            <input
-              type="checkbox"
-              checked={showMateraiBox}
-              onChange={(e) => setShowMateraiBox(e.target.checked)}
-              className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
-            />
-          </label>
+
+          {docType === "suratJalan" && (
+            <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+              <span className="text-sm text-ink/80">
+                Tampilkan tanda tangan
+              </span>
+              <input
+                type="checkbox"
+                checked={showSjSignature}
+                onChange={(e) => setShowSjSignature(e.target.checked)}
+                className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+              />
+            </label>
+          )}
+
+          {docType === "invoice" && (
+            <label className="flex items-center justify-between gap-3 border border-line rounded-lg px-3 py-3 lg:py-2.5 cursor-pointer">
+              <span className="text-sm text-ink/80">Kotak tempel materai</span>
+              <input
+                type="checkbox"
+                checked={showMateraiBox}
+                onChange={(e) => setShowMateraiBox(e.target.checked)}
+                className="w-5 h-5 lg:w-4 lg:h-4 accent-ink"
+              />
+            </label>
+          )}
+
           <label className="flex items-center justify-center gap-2 border border-dashed border-line rounded-lg min-h-11 lg:min-h-0 py-2.5 text-sm text-ink/60 hover:border-ink cursor-pointer transition-colors">
             <Upload className="w-4 h-4" />{" "}
             {signatureUrl ? "Ganti file" : "Upload tanda tangan"}
@@ -4200,8 +4244,8 @@ export default function InvoiceGenerator() {
           </label>
           {!signatureUrl && (
             <p className="text-[11px] text-ink/40">
-              Belum ada tanda tangan diupload — cuma cap yang bakal tampil di
-              invoice.
+              Belum ada tanda tangan diupload — cuma cap yang bakal tampil di{" "}
+              {docType === "invoice" ? "invoice" : "surat jalan"}.
             </p>
           )}
           {signatureUrl && (
@@ -4239,8 +4283,9 @@ export default function InvoiceGenerator() {
               />
             </div>
             <p className="text-[11px] text-ink/40">
-              Tampil di bawah garis tanda tangan. Kalau nama dikosongkan, yang
-              tampil &quot;Makmur A3&apos;S&quot;.
+              {docType === "invoice"
+                ? "Tampil di bawah garis tanda tangan. Kalau nama dikosongkan, yang tampil \u201CMakmur A3'S\u201D."
+                : "Tampil di bawah garis \u201CPengirim\u201D. Kalau dikosongkan, cuma tulisan \u201CPengirim\u201D yang tampil."}
             </p>
           </div>
         </>

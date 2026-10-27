@@ -1,5 +1,9 @@
 "use client";
 
+// app/products/ProductsClient.tsx  (REVISI)
+// Perubahan: data dari CATALOG_PRODUCTS, hasil filter dikelompokkan per grup
+// varian (groupCatalog), pencarian juga cocok ke nama grup, dan hitungan
+// "produk" + pagination sekarang menghitung entri katalog, bukan varian.
 import { useMemo, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -12,7 +16,9 @@ import {
   ChevronDown,
 } from "lucide-react";
 import ProductCard from "@/components/ProductCard";
-import { DIVISIONS, ALL_PRODUCTS } from "@/lib/data";
+import { DIVISIONS } from "@/lib/data";
+import { CATALOG_PRODUCTS, getGroupByCode, groupCatalog } from "@/lib/variants";
+import type { CatalogEntry } from "@/lib/variants";
 
 const PAGE_SIZE = 12;
 
@@ -22,10 +28,44 @@ const PAGE_SIZE = 12;
 //   Kategori    = Division / `divisi`   (?divisi=...)
 //   Subkategori = Category / `kategori` (?kategori=...)
 
-function sortProducts<T extends { name: string; code: string }>(
-  items: T[],
-): T[] {
-  return [...items].sort((a, b) => a.name.localeCompare(b.name));
+function entryTitle(e: CatalogEntry) {
+  return e.group ? e.group.name : e.product.name;
+}
+
+// Urutan Kategori & Subkategori mengikuti susunan di lib/data.ts (bukan A–Z),
+// jadi urutannya bisa diatur dari sana.
+const DIVISI_ORDER = new Map(DIVISIONS.map((d, i) => [d.id, i]));
+const KATEGORI_ORDER = new Map(
+  DIVISIONS.flatMap((d) => d.categories.map((c, i) => [c.id, i] as const)),
+);
+
+// Nama diurutkan A–Z, peka angka (RX145 sebelum RX1200) dan tidak peka huruf
+// besar-kecil.
+const byTitle = (a: CatalogEntry, b: CatalogEntry) =>
+  entryTitle(a).localeCompare(entryTitle(b), "id", {
+    numeric: true,
+    sensitivity: "base",
+  });
+
+// byStructure = true: Kategori → Subkategori (urutan data.ts) → A–Z di dalamnya.
+// byStructure = false (hasil pencarian): A–Z saja.
+function sortEntries(
+  items: CatalogEntry[],
+  byStructure: boolean,
+): CatalogEntry[] {
+  return [...items].sort((a, b) => {
+    if (byStructure) {
+      const d =
+        (DIVISI_ORDER.get(a.product.divisionId) ?? 0) -
+        (DIVISI_ORDER.get(b.product.divisionId) ?? 0);
+      if (d !== 0) return d;
+      const k =
+        (KATEGORI_ORDER.get(a.product.categoryId) ?? 0) -
+        (KATEGORI_ORDER.get(b.product.categoryId) ?? 0);
+      if (k !== 0) return k;
+    }
+    return byTitle(a, b);
+  });
 }
 
 // Full tree: Kategori (Division) → Subkategori (Category). Always shows every
@@ -214,19 +254,27 @@ export default function ProductsClient() {
     setExpandedId((prev) => (prev === divisiId ? null : divisiId));
   };
 
-  const filtered = useMemo(() => {
-    const matches = ALL_PRODUCTS.filter((p) => {
+  // Filter per varian (kode/nama varian tetap bisa dicari), lalu dikelompokkan
+  // jadi satu entri per grup.
+  const { filtered, skuCount } = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const matches = CATALOG_PRODUCTS.filter((p) => {
       const matchDivisi =
         activeDivisiId === "all" || p.divisionId === activeDivisiId;
       const matchKategori =
         !activeKategoriId || p.categoryId === activeKategoriId;
       const matchQuery =
-        query.trim() === "" ||
-        p.name.toLowerCase().includes(query.toLowerCase()) ||
-        p.code.toLowerCase().includes(query.toLowerCase());
+        q === "" ||
+        p.name.toLowerCase().includes(q) ||
+        p.code.toLowerCase().includes(q) ||
+        (getGroupByCode(p.code)?.name.toLowerCase().includes(q) ?? false);
       return matchDivisi && matchKategori && matchQuery;
     });
-    return sortProducts(matches);
+    // skuCount = jumlah SKU (varian) yang cocok; filtered = kartu.
+    return {
+      filtered: sortEntries(groupCatalog(matches), q === ""),
+      skuCount: matches.length,
+    };
   }, [activeDivisiId, activeKategoriId, query]);
 
   useEffect(() => {
@@ -341,8 +389,8 @@ export default function ProductsClient() {
           </div>
 
           <div className="text-xs text-ink/45 font-data mb-6">
-            {filtered.length} produk
-            {query.trim() && <> · hasil untuk &quot;{query}&quot;</>}
+            {filtered.length} produk · {skuCount} SKU
+            {query.trim() && <> — hasil untuk &quot;{query}&quot;</>}
           </div>
 
           {filtered.length === 0 ? (
@@ -356,15 +404,19 @@ export default function ProductsClient() {
                 id="product-grid-top"
                 className="grid grid-cols-2 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-5 scroll-mt-24"
               >
-                {paginated.map((p) => (
-                  <ProductCard key={p.code} product={p} />
+                {paginated.map((e) => (
+                  <ProductCard
+                    key={e.group?.id ?? e.product.code}
+                    product={e.product}
+                  />
                 ))}
               </div>
 
               {totalPages > 1 && (
                 <div className="flex items-center justify-between gap-4 mt-10 pt-6 border-t border-line">
                   <span className="text-xs text-ink/45 font-data">
-                    Halaman {page} dari {totalPages} · {filtered.length} produk
+                    Halaman {page} dari {totalPages} — {filtered.length} produk
+                    ({skuCount} SKU)
                   </span>
                   <div className="flex items-center gap-1.5">
                     <button

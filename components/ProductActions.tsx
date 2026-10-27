@@ -1,5 +1,8 @@
 "use client";
 
+// components/ProductActions.tsx  (REVISI)
+// Perubahan: prop `displayName` (nama + varian untuk cart & WhatsApp),
+// dan qty direset saat varian berganti.
 import { useState, useEffect } from "react";
 import { ShoppingCart, Check, Minus, Plus } from "lucide-react";
 import Button from "@/components/ui/Button";
@@ -8,17 +11,25 @@ import type { Product } from "@/lib/data";
 
 const WHATSAPP_NUMBER = "6287878311243";
 
-export default function ProductActions({ product }: { product: Product }) {
+export default function ProductActions({
+  product,
+  displayName,
+}: {
+  product: Product;
+  displayName?: string;
+}) {
   const { items, addItem, updateQty } = useCart();
   const cartItem = items.find((i) => i.code === product.code);
+  const name = displayName ?? product.name;
 
   const [qty, setQty] = useState(cartItem?.qty ?? 1);
   const [added, setAdded] = useState(false);
 
-  // Keep local selector synced if cart qty changes elsewhere (e.g. from ProductCard)
+  // Sinkron dengan cart (mis. diubah dari ProductCard) dan reset saat ganti varian.
   useEffect(() => {
-    if (cartItem) setQty(cartItem.qty);
-  }, [cartItem?.qty]);
+    setQty(cartItem?.qty ?? 1);
+    setAdded(false);
+  }, [product.code, cartItem?.qty]);
 
   const handleDec = () => {
     if (cartItem) {
@@ -40,7 +51,7 @@ export default function ProductActions({ product }: { product: Product }) {
     addItem(
       {
         code: product.code,
-        name: product.name,
+        name,
         categoryName: product.categoryName,
       },
       qty,
@@ -50,7 +61,7 @@ export default function ProductActions({ product }: { product: Product }) {
   };
 
   const waMessage = encodeURIComponent(
-    `Halo Makmur A3'S, saya mau tanya soal produk ${product.name} (${product.code}).`,
+    `Halo Makmur A3'S, saya mau tanya soal produk ${name} (${product.code}).`,
   );
   const waHref = `https://wa.me/${WHATSAPP_NUMBER}?text=${waMessage}`;
 
